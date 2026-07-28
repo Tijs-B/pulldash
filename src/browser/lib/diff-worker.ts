@@ -388,15 +388,56 @@ function detectAndUnpairCrossings(
   }
 }
 
-function emitNormal(out: Line[], c: _Change) {
-  out.push(changeToLine(c));
+function unpairCrossingContextLines(
+  changes: _Change[],
+  pairOfDel: Int32Array,
+  pairOfAdd: Int32Array,
+  deleteIdxs: number[]
+) {
+  for (const di of deleteIdxs) {
+    const ai = pairOfDel[di];
+    if (ai === UNPAIRED) continue;
+    const del = changes[di] as DeleteChange;
+    const add = changes[ai] as InsertChange;
+    const delOld = del.lineNumber;
+    const addNew = add.lineNumber;
+    const lo = Math.min(delOld, addNew);
+    const hi = Math.max(delOld, addNew);
+
+    for (let i = di + 1; i < ai; i++) {
+      const c = changes[i];
+      if (c.type !== "normal") continue;
+      const ctxOld = (c as any).oldLineNumber;
+      const ctxNew = (c as any).newLineNumber;
+      if (ctxOld == null || ctxNew == null) continue;
+      const oldBetween = ctxOld > lo && ctxOld < hi;
+      const newBetween = ctxNew > lo && ctxNew < hi;
+      if (oldBetween && !newBetween) {
+        pairOfDel[di] = UNPAIRED;
+        pairOfAdd[ai] = UNPAIRED;
+        return unpairCrossingContextLines(
+          changes,
+          pairOfDel,
+          pairOfAdd,
+          deleteIdxs
+        );
+      }
+    }
+  }
+}
+
+function emitNormal(out: Line[], c: _Change, sortIdx: number) {
+  const line = changeToLine(c);
+  (line as any)._sortIdx = sortIdx;
+  out.push(line);
 }
 
 function emitModified(
   out: Line[],
   del: DeleteChange,
   add: InsertChange,
-  options: ParseOptions
+  options: ParseOptions,
+  sortIdx: number
 ) {
   out.push({
     oldLineNumber: del.lineNumber,
@@ -409,6 +450,7 @@ function emitModified(
       options.inlineMaxCharEdits
     ),
   });
+  (out[out.length - 1] as any)._sortIdx = sortIdx;
 }
 
 function emitLines(
@@ -427,15 +469,15 @@ function emitLines(
 
     if (c.type === "normal") {
       processed[i] = 1;
-      emitNormal(out, c);
+      emitNormal(out, c, i);
     } else if (c.type === "delete") {
       const pairedAddIdx = pairOfDel[i];
       if (pairedAddIdx === UNPAIRED) {
         processed[i] = 1;
-        emitNormal(out, c);
+        emitNormal(out, c, i);
       } else {
         const add = changes[pairedAddIdx] as InsertChange;
-        emitModified(out, c, add, options);
+        emitModified(out, c, add, options, i);
         processed[i] = 1;
         processed[pairedAddIdx] = 1;
       }
@@ -443,45 +485,23 @@ function emitLines(
       const pairedDelIdx = pairOfAdd[i];
       if (pairedDelIdx === UNPAIRED) {
         processed[i] = 1;
-        unpairedInserts.push(changeToLine(c));
+        const line = changeToLine(c);
+        (line as any)._sortIdx = i;
+        unpairedInserts.push(line);
       } else {
         const del = changes[pairedDelIdx] as DeleteChange;
-        emitModified(out, del, c, options);
+        emitModified(out, del, c, options, pairedDelIdx);
         processed[i] = 1;
         processed[pairedDelIdx] = 1;
       }
     }
   }
 
-  const deletePosition = new Map<Line, number>();
-  for (let i = 0; i < out.length; i++) {
-    const line = out[i];
-    if ((line as any).newLineNumber != null) continue;
-    if (line.type !== "delete") continue;
-    for (let j = i + 1; j < out.length; j++) {
-      const next = out[j];
-      const n = (next as any).newLineNumber;
-      if (n != null) {
-        deletePosition.set(line, n);
-        break;
-      }
-    }
-  }
-
   const result = [...out, ...unpairedInserts];
   result.sort((a, b) => {
-    const aPos =
-      (a as any).newLineNumber ??
-      deletePosition.get(a) ??
-      (a as any).lineNumber ??
-      -Infinity;
-    const bPos =
-      (b as any).newLineNumber ??
-      deletePosition.get(b) ??
-      (b as any).lineNumber ??
-      -Infinity;
-    if (aPos !== bPos) return aPos - bPos;
-    return 0;
+    const aIdx = (a as any)._sortIdx ?? -Infinity;
+    const bIdx = (b as any)._sortIdx ?? -Infinity;
+    return aIdx - bIdx;
   });
 
   for (let i = 0; i < result.length - 1; i++) {
@@ -543,6 +563,8 @@ export function mergeModifiedLines(
       break;
     }
   }
+
+  unpairCrossingContextLines(changes, pairOfDel, pairOfAdd, deleteIdxs);
 
   return emitLines(changes, pairOfDel, pairOfAdd, options);
 }

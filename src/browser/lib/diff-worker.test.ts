@@ -895,15 +895,16 @@ describe("error propagation", () => {
     });
 
     // Verify overall output structure:
-    // 1. New-line numbers are monotonic (non-decreasing)
-    let prevNew: number | null = null;
+    // 1. Old-line numbers are monotonic (non-decreasing)
+    let prevOld: number | null = null;
     for (const l of lines) {
-      const n = (l as any).newLineNumber;
-      if (n != null) {
-        if (prevNew != null) {
-          expect(n).toBeGreaterThanOrEqual(prevNew);
+      if (l.type === "insert") continue;
+      const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+      if (o != null) {
+        if (prevOld != null) {
+          expect(o).toBeGreaterThanOrEqual(prevOld);
         }
-        prevNew = n;
+        prevOld = o;
       }
     }
 
@@ -953,8 +954,8 @@ describe("error propagation", () => {
   test("standalone del/ins lines produce monotonic new-line numbers in all-deletes-first blocks", () => {
     // A block replacement where all deletes precede all inserts.
     // With maxChangeRatio=0.45, different-content lines won't pair,
-    // so they remain as standalone deletes and inserts.  The output
-    // must be sorted by new-line position so line numbers don't jump.
+    // so they remain as standalone deletes and inserts.  Sort-by-index
+    // keeps lines in original changes order (deletes then inserts).
     const patch = [
       "@@ -1,4 +1,4 @@",
       " context1",
@@ -988,10 +989,9 @@ describe("error propagation", () => {
       }
     }
 
-    // Lines are sorted by position: deletes and inserts at the same
-    // change-index position are placed in their original insertion order,
-    // so a delete (old=2) and its matching insert (new=2) are adjacent
-    // with the delete first (it appeared first in the changes array).
+    // Lines are sorted by their original index in the changes array.
+    // Unpaired deletes and inserts appear in the order they were in the
+    // original diff (deletes then inserts, within each group in file order).
     const appleDel = lines.find(
       (l: any) => l.type === "delete" && l.content[0]?.value === "apple"
     );
@@ -1009,19 +1009,19 @@ describe("error propagation", () => {
     expect(bananaDel).toBeDefined();
     expect(dateIns).toBeDefined();
 
-    // apple (old=2) and cherry (new=2) share the same sort position;
-    // apple came first in the original change array so it sorts first.
+    // apple (idx=1) sorts before cherry (idx=3) because it appeared
+    // first in the original changes array.
     const appleIdx = lines.indexOf(appleDel!);
     const cherryIdx = lines.indexOf(cherryIns!);
     expect(appleIdx).toBeLessThan(cherryIdx);
 
-    // banana (old=3, pos=3) sorts after cherry (new=2, pos=2)
-    // because position 3 > 2.
+    // banana (idx=2) sorts before cherry (idx=3) because deletes
+    // precede inserts in original diff order.
     const bananaIdx = lines.indexOf(bananaDel!);
-    expect(bananaIdx).toBeGreaterThan(cherryIdx);
+    expect(bananaIdx).toBeLessThan(cherryIdx);
 
-    // banana (pos=3) and date (pos=3) share the same position;
-    // banana came first so it sorts before date.
+    // banana (idx=2) sorts before date (idx=4) — both are in
+    // original changes order.
     const dateIdx = lines.indexOf(dateIns!);
     expect(bananaIdx).toBeLessThan(dateIdx);
   });
@@ -1077,6 +1077,56 @@ describe("error propagation", () => {
     const afterIdx = lines.indexOf(foobarSegments!);
     expect(delIdx).toBeGreaterThan(beforeIdx);
     expect(delIdx).toBeLessThan(afterIdx);
+  });
+
+  test("old-line numbers are monotonic when modified line shifts past a following context line", () => {
+    // A modified line (old=2, new=3) and a context line (old=3, new=2)
+    // cause the left gutter to show 3 then 2 when sorted by new-line
+    // number.  Sort-by-index preserves original diff order so old-line
+    // numbers remain monotonic even when new-line numbers are not.
+    //   old: A(1), "foo bar"(2), C(3), D(4)
+    //   new: A(1), C(2), "foo baz"(3), D(4)
+    const patch = [
+      "@@ -1,4 +1,4 @@",
+      " A",
+      "-foo bar",
+      " C",
+      "+foo baz",
+      " D",
+    ].join("\n");
+
+    const diffContent = `diff --git a/file b/file\n--- a/file\n+++ b/file\n${patch}`;
+    const files = gitDiffParser.parse(diffContent);
+    const changes = files[0].hunks[0].changes;
+
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+    const lines = mergeModifiedLines(changes, opts);
+
+    // Old-line numbers must be non-decreasing (source column ordering)
+    let prevOld: number | null = null;
+    for (const l of lines) {
+      if (l.type === "insert") continue;
+      const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+      if (o != null) {
+        if (prevOld != null) {
+          expect(o).toBeGreaterThanOrEqual(prevOld);
+        }
+        prevOld = o;
+      }
+    }
+
+    // Verify the merged line has correct old/new pair (old=2, new=3)
+    const merged = lines.find(
+      (l: any) =>
+        l.type === "normal" && l.oldLineNumber === 2 && l.newLineNumber === 3
+    );
+    expect(merged).toBeDefined();
+    expect(merged!.content.length).toBeGreaterThan(1);
   });
 
   test("adjacent empty delete+insert lines merge into one normal line", () => {
