@@ -5,6 +5,7 @@ import {
   type TimelineEvent,
 } from "@/browser/contexts/github";
 import { usePRReviewStore, usePRReviewSelector } from ".";
+import { setLastViewed } from "@/browser/lib/waiting-prs";
 
 export function useReviewActions() {
   const store = usePRReviewStore();
@@ -84,6 +85,7 @@ export function useReviewActions() {
       }
 
       github.invalidatePR(owner, repo, pr.number);
+      setLastViewed(`${owner}/${repo}#${pr.number}`);
 
       // Refresh comments, reviews, and timeline
       const [newComments, reviews, timeline] = await Promise.all([
