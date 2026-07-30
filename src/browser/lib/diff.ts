@@ -46,7 +46,9 @@ export class DiffWorkerPool {
     this.initialized = true;
 
     for (let i = 0; i < POOL_SIZE; i++) {
-      const worker = new Worker("/lib/diff-worker.js", { type: "module" });
+      const worker = new Worker(`/lib/diff-worker.js?v=${Date.now()}`, {
+        type: "module",
+      });
 
       worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
         const response = event.data;

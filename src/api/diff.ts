@@ -324,6 +324,48 @@ function buildInitialPairs(
   return { pairOfDel, pairOfAdd };
 }
 
+function detectAndUnpairCrossings(
+  changes: _Change[],
+  pairOfDel: Int32Array,
+  pairOfAdd: Int32Array,
+  deleteIdxs: number[]
+) {
+  const pairs: { delIdx: number; oldLN: number; newLN: number }[] = [];
+  for (const di of deleteIdxs) {
+    const ai = pairOfDel[di];
+    if (ai === UNPAIRED) continue;
+    const del = changes[di] as DeleteChange;
+    const add = changes[ai] as InsertChange;
+    pairs.push({ delIdx: di, oldLN: del.lineNumber, newLN: add.lineNumber });
+  }
+
+  pairs.sort((a, b) => a.newLN - b.newLN);
+
+  for (let i = 1; i < pairs.length; i++) {
+    if (pairs[i].oldLN < pairs[i - 1].oldLN) {
+      const d1 = Math.abs(pairs[i - 1].oldLN - pairs[i - 1].newLN);
+      const d2 = Math.abs(pairs[i].oldLN - pairs[i].newLN);
+      if (d1 >= d2) {
+        const di = pairs[i - 1].delIdx;
+        const ai = pairOfDel[di];
+        pairOfDel[di] = UNPAIRED;
+        pairOfAdd[ai] = UNPAIRED;
+      } else {
+        const di = pairs[i].delIdx;
+        const ai = pairOfDel[di];
+        pairOfDel[di] = UNPAIRED;
+        pairOfAdd[ai] = UNPAIRED;
+      }
+      return detectAndUnpairCrossings(
+        changes,
+        pairOfDel,
+        pairOfAdd,
+        deleteIdxs
+      );
+    }
+  }
+}
+
 function buildUnpairedDeletePrefix(changes: _Change[], pairOfDel: Int32Array) {
   const n = changes.length;
   const prefix = new Int32Array(n + 1);
@@ -490,7 +532,21 @@ function mergeModifiedLines(changes: _Change[], options: ParseOptions): Line[] {
     deleteIdxs,
     options
   );
-  const unpairedDelPrefix = buildUnpairedDeletePrefix(changes, pairOfDel);
+
+  detectAndUnpairCrossings(changes, pairOfDel, pairOfAdd, deleteIdxs);
+
+  // Count unpaired deletes and inserts to detect complete permutations
+  // (e.g. rotation of identical lines) where crossings are expected.
+  let unpairedDelCount = 0;
+  for (const di of deleteIdxs) {
+    if (pairOfDel[di] === UNPAIRED) unpairedDelCount++;
+  }
+  let unpairedInsCount = 0;
+  for (const ai of insertIdxs) {
+    if (pairOfAdd[ai] === UNPAIRED) unpairedInsCount++;
+  }
+  const isCompletePermutation =
+    unpairedDelCount > 0 && unpairedDelCount === unpairedInsCount;
 
   for (const di of deleteIdxs) {
     if (pairOfDel[di] !== UNPAIRED) continue;
@@ -501,12 +557,37 @@ function mergeModifiedLines(changes: _Change[], options: ParseOptions): Line[] {
       const add = changes[ai] as InsertChange;
       if (del.content.trim() !== add.content.trim()) continue;
       if (del.content.trim() === "") continue;
+
+      // Prevent re-pairing that would create non-monotonic crossings,
+      // unless this is a complete permutation (rotation) of identical lines.
+      if (!isCompletePermutation) {
+        const candOld = del.lineNumber;
+        const candNew = add.lineNumber;
+        let createsCrossing = false;
+        for (const ddi of deleteIdxs) {
+          if (ddi === di) continue;
+          const aai = pairOfDel[ddi];
+          if (aai === UNPAIRED) continue;
+          const d = changes[ddi] as DeleteChange;
+          const a = changes[aai] as InsertChange;
+          if (
+            (candOld < d.lineNumber && candNew > a.lineNumber) ||
+            (candOld > d.lineNumber && candNew < a.lineNumber)
+          ) {
+            createsCrossing = true;
+            break;
+          }
+        }
+        if (createsCrossing) continue;
+      }
+
       pairOfDel[di] = ai;
       pairOfAdd[ai] = di;
       break;
     }
   }
 
+  const unpairedDelPrefix = buildUnpairedDeletePrefix(changes, pairOfDel);
   return emitLines(changes, pairOfDel, pairOfAdd, unpairedDelPrefix, options);
 }
 

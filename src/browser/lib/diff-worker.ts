@@ -549,6 +549,19 @@ export function mergeModifiedLines(
   );
   detectAndUnpairCrossings(changes, pairOfDel, pairOfAdd, deleteIdxs);
 
+  // Count unpaired deletes and inserts to detect complete permutations
+  // (e.g. rotation of identical lines) where crossings are expected.
+  let unpairedDelCount = 0;
+  for (const di of deleteIdxs) {
+    if (pairOfDel[di] === UNPAIRED) unpairedDelCount++;
+  }
+  let unpairedInsCount = 0;
+  for (const ai of insertIdxs) {
+    if (pairOfAdd[ai] === UNPAIRED) unpairedInsCount++;
+  }
+  const isCompletePermutation =
+    unpairedDelCount > 0 && unpairedDelCount === unpairedInsCount;
+
   for (const di of deleteIdxs) {
     if (pairOfDel[di] !== UNPAIRED) continue;
     const del = changes[di] as DeleteChange;
@@ -558,6 +571,16 @@ export function mergeModifiedLines(
       const add = changes[ai] as InsertChange;
       if (del.content.trim() !== add.content.trim()) continue;
       if (del.content.trim() === "") continue;
+
+      // Prevent re-pairing that would create non-monotonic crossings,
+      // unless this is a complete permutation (rotation) of identical lines.
+      if (
+        !isCompletePermutation &&
+        wouldCreateCrossing(changes, pairOfDel, pairOfAdd, deleteIdxs, di, ai)
+      ) {
+        continue;
+      }
+
       pairOfDel[di] = ai;
       pairOfAdd[ai] = di;
       break;
@@ -567,6 +590,38 @@ export function mergeModifiedLines(
   unpairCrossingContextLines(changes, pairOfDel, pairOfAdd, deleteIdxs);
 
   return emitLines(changes, pairOfDel, pairOfAdd, options);
+}
+
+function wouldCreateCrossing(
+  changes: _Change[],
+  pairOfDel: Int32Array,
+  pairOfAdd: Int32Array,
+  deleteIdxs: number[],
+  candidateDelIdx: number,
+  candidateAddIdx: number
+): boolean {
+  const del = changes[candidateDelIdx] as DeleteChange;
+  const add = changes[candidateAddIdx] as InsertChange;
+  const candOld = del.lineNumber;
+  const candNew = add.lineNumber;
+
+  for (const di of deleteIdxs) {
+    if (di === candidateDelIdx) continue;
+    const ai = pairOfDel[di];
+    if (ai === UNPAIRED) continue;
+    const d = changes[di] as DeleteChange;
+    const a = changes[ai] as InsertChange;
+    const otherOld = d.lineNumber;
+    const otherNew = a.lineNumber;
+
+    if (
+      (candOld < otherOld && candNew > otherNew) ||
+      (candOld > otherOld && candNew < otherNew)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const parseHunk = (hunk: _Hunk, options: ParseOptions): Hunk => {
@@ -682,14 +737,22 @@ ${patch}`;
           !newFileHighlighted &&
           (line.type === "normal" || line.type === "insert")
         ) {
-          newBlockLines.push(line.content[0]?.value ?? "");
+          newBlockLines.push(
+            line.content.length === 1
+              ? (line.content[0]?.value ?? "")
+              : line.content.map((s) => s.value).join("")
+          );
           newBlockIndices.push(i);
         }
         if (
           !oldFileHighlighted &&
           (line.type === "normal" || line.type === "delete")
         ) {
-          oldBlockLines.push(line.content[0]?.value ?? "");
+          oldBlockLines.push(
+            line.content.length === 1
+              ? (line.content[0]?.value ?? "")
+              : line.content.map((s) => s.value).join("")
+          );
           oldBlockIndices.push(i);
         }
       }
@@ -722,8 +785,15 @@ ${patch}`;
     const lookupOldHtml = (
       lineIndex: number,
       oldNum: number | undefined,
-      fallback: string
+      fallback: string,
+      lineType: string
     ): string => {
+      // For delete lines, always highlight directly — the full-file
+      // content at oldNum-1 may not match the diff's old content
+      // (file fetched from a different ref, or index shifted).
+      if (lineType === "delete") {
+        return highlight(fallback, prevLanguage);
+      }
       if (oldFileHighlighted) {
         if (oldNum != null && oldFileHighlighted[oldNum - 1] != null) {
           return oldFileHighlighted[oldNum - 1];
@@ -767,7 +837,7 @@ ${patch}`;
             if (singleSegmentIsNormal) {
               html =
                 line.type === "delete"
-                  ? lookupOldHtml(i, oldNum, seg.value)
+                  ? lookupOldHtml(i, oldNum, seg.value, line.type)
                   : lookupNewHtml(i, newNum, seg.value);
             } else {
               // Multiple segments (inline diff) - highlight each segment individually
@@ -850,14 +920,30 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
           request.oldContent,
           request.newContent
         );
-        self.postMessage({
+
+        // DEBUG: send line summary to main thread for diagnostics
+        const debugLines: any[] = [];
+        for (const h of result.hunks) {
+          if (h.type === "hunk") {
+            for (const l of h.lines) {
+              debugLines.push({
+                type: l.type,
+                old: (l as any).oldLineNumber ?? (l as any).lineNumber,
+                new: (l as any).newLineNumber,
+                content: l.content?.map((s: any) => s.value).join("") ?? "",
+              });
+            }
+          }
+        }
+
+        (self as any).postMessage({
           type: "parse-diff-result",
           id: request.id,
           result,
-        } as WorkerResponse);
+          _debug: { lines: debugLines },
+        });
         break;
       }
-
       case "highlight-lines": {
         const result = highlightFileLines(
           request.content,

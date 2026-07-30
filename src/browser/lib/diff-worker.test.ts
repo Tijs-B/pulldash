@@ -1164,6 +1164,244 @@ describe("error propagation", () => {
     expect(lines[2].content[0]?.value).toBe("two");
   });
 
+  test("crossing content-identical pairs prevented when not a complete permutation", () => {
+    // Regression test: when a multi-line install block is restructured,
+    // content-identical lines (install.sh, xe-linux-distribution) that
+    // move to different positions must NOT be merged as normal/context
+    // lines if doing so creates non-monotonic crossings. The second pass
+    // should only allow crossing pairs for complete permutations (rotations).
+    const patch = [
+      "@@ -238,12 +238,14 @@",
+      " install -m 0644 %{SOURCE1} iso/README.txt",
+      " unzip %{SOURCE100} '*/package/*'",
+      " cp -r -T %{winpv_version_x64}/package iso/Windows",
+      "-install -m 0644 versions.tgz versions.rpm versions.deb iso/Linux/",
+      "-install -m 0755 mk/install.sh \\",
+      "-                mk/xe-linux-distribution \\",
+      "+install -m 0644 versions.tgz \\",
+      "+                versions.rpm \\",
+      "+                versions.deb \\",
+      "                 mk/xe-linux-distribution.service \\",
+      "                 mk/xen-vcpu-hotplug.rules \\",
+      "-                LICENSE \\",
+      "+                LICENSE",
+      "+install -m 0755 mk/install.sh \\",
+      "+                mk/xe-linux-distribution \\",
+      "                 iso/Linux/",
+      " ",
+      " genisoimage -joliet -joliet-long -r \\",
+    ].join("\n");
+
+    const diffContent = `diff --git a/SPECS/xcp-ng-pv-tools.spec b/SPECS/xcp-ng-pv-tools.spec\n--- a/SPECS/xcp-ng-pv-tools.spec\n+++ b/SPECS/xcp-ng-pv-tools.spec\n${patch}`;
+    const files = gitDiffParser.parse(diffContent);
+    const changes = files[0].hunks[0].changes;
+
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+    const lines = mergeModifiedLines(changes, opts);
+
+    // All old-line-number values (for non-insert lines) must be
+    // non-decreasing — left gutter monotonicity.
+    let prevOld: number | null = null;
+    for (const l of lines) {
+      if (l.type === "insert") continue;
+      const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+      if (o != null) {
+        if (prevOld != null) {
+          expect(o).toBeGreaterThanOrEqual(prevOld);
+        }
+        prevOld = o;
+      }
+    }
+
+    // All new-line-number values (where present) must be non-decreasing.
+    let prevNew: number | null = null;
+    for (const l of lines) {
+      const n = (l as any).newLineNumber;
+      if (n != null) {
+        if (prevNew != null) {
+          expect(n).toBeGreaterThanOrEqual(prevNew);
+        }
+        prevNew = n;
+      }
+    }
+
+    // The content-identical lines (install -m 0755 mk/install.sh and
+    // mk/xe-linux-distribution) must NOT be merged as a single normal line
+    // with old=242/new=247 crossing. They should remain as separate
+    // delete and insert lines since this is not a complete permutation.
+    const crossingPair = lines.find(
+      (l: any) =>
+        l.type === "normal" &&
+        l.oldLineNumber === 242 &&
+        l.newLineNumber === 247
+    );
+    expect(crossingPair).toBeUndefined();
+
+    // The install.sh line should appear as a delete (old side) or insert
+    // (new side), not merged.
+    const installShDel = lines.find(
+      (l: any) =>
+        l.type === "delete" &&
+        l.content[0]?.value === "install -m 0755 mk/install.sh \\"
+    );
+    const installShIns = lines.find(
+      (l: any) =>
+        l.type === "insert" &&
+        l.content[0]?.value === "install -m 0755 mk/install.sh \\"
+    );
+    expect(installShDel).toBeDefined();
+    expect(installShIns).toBeDefined();
+
+    // The first install line (old 241 → new 241) should still be merged
+    // as a word-diff since it has a genuine modification.
+    const firstInstallMerged = lines.find(
+      (l: any) =>
+        l.type === "normal" &&
+        l.oldLineNumber === 241 &&
+        l.newLineNumber === 241
+    );
+    expect(firstInstallMerged).toBeDefined();
+    expect(firstInstallMerged!.content.length).toBeGreaterThan(1);
+
+    // ------------------------------------------------------------------
+    // Simulate convertToSplitPairs to verify split-view rendering.
+    // ------------------------------------------------------------------
+    const splitPairs = convertToSplitPairs(lines);
+
+    // Every pair must have monotonically increasing left (old) line numbers.
+    let prevLeft: number | null = null;
+    for (const pair of splitPairs) {
+      if (!pair.left) continue;
+      const o =
+        (pair.left as any).oldLineNumber ?? (pair.left as any).lineNumber;
+      if (o != null) {
+        if (prevLeft != null) {
+          expect(o).toBeGreaterThanOrEqual(prevLeft);
+        }
+        prevLeft = o;
+      }
+    }
+
+    // Every pair must have monotonically increasing right (new) line numbers.
+    let prevRight: number | null = null;
+    for (const pair of splitPairs) {
+      if (!pair.right) continue;
+      const n =
+        (pair.right as any).newLineNumber ?? (pair.right as any).lineNumber;
+      if (n != null) {
+        if (prevRight != null) {
+          expect(n).toBeGreaterThanOrEqual(prevRight);
+        }
+        prevRight = n;
+      }
+    }
+
+    // The left side at old line 242 must NOT show old-241 content.
+    // It must show what was actually at old line 242: install.sh.
+    const pairAt242 = splitPairs.find(
+      (p) => p.left && p.left.oldLineNumber === 242
+    );
+    expect(pairAt242).toBeDefined();
+    const left242Text = pairAt242!
+      .left!.content.map((s: any) => s.value)
+      .join("");
+    expect(left242Text).toContain("install -m 0755 mk/install.sh");
+    expect(left242Text).not.toContain("versions.rpm versions.deb");
+
+    // The left side at old line 243 must show mk/xe-linux-distribution.
+    const pairAt243 = splitPairs.find(
+      (p) => p.left && p.left.oldLineNumber === 243
+    );
+    expect(pairAt243).toBeDefined();
+    const left243Text = pairAt243!
+      .left!.content.map((s: any) => s.value)
+      .join("");
+    expect(left243Text).toContain("mk/xe-linux-distribution");
+
+    // No pair should have left content that is a raw old-241 line
+    // appearing somewhere else (the duplication bug).
+    const old241FullLine =
+      "install -m 0644 versions.tgz versions.rpm versions.deb iso/Linux/";
+    for (const pair of splitPairs) {
+      if (!pair.left) continue;
+      const o =
+        (pair.left as any).oldLineNumber ?? (pair.left as any).lineNumber;
+      if (o !== 241 && pair.left.content.length === 1) {
+        const text = pair.left.content[0].value;
+        expect(text).not.toBe(old241FullLine);
+      }
+    }
+  });
+
+  // Minimal split-pair converter matching the logic in pr-review.tsx
+  function convertToSplitPairs(lines: any[]): any[] {
+    interface SplitPair {
+      left: any;
+      right: any;
+      lineNum?: number;
+    }
+    const pairs: SplitPair[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.type === "normal") {
+        const hasWordDiff = line.content.some((s: any) => s.type !== "normal");
+        if (hasWordDiff) {
+          pairs.push({
+            left: {
+              ...line,
+              type: "delete",
+              content: line.content.filter((s: any) => s.type !== "insert"),
+            },
+            right: {
+              ...line,
+              type: "insert",
+              content: line.content.filter((s: any) => s.type !== "delete"),
+            },
+            lineNum: line.oldLineNumber || line.newLineNumber,
+          });
+        } else {
+          pairs.push({
+            left: line,
+            right: line,
+            lineNum: line.newLineNumber || line.oldLineNumber,
+          });
+        }
+        i++;
+      } else if (line.type === "delete") {
+        const deletes: any[] = [];
+        while (i < lines.length && lines[i].type === "delete") {
+          deletes.push(lines[i]);
+          i++;
+        }
+        const inserts: any[] = [];
+        while (i < lines.length && lines[i].type === "insert") {
+          inserts.push(lines[i]);
+          i++;
+        }
+        const maxLen = Math.max(deletes.length, inserts.length);
+        for (let j = 0; j < maxLen; j++) {
+          const del = deletes[j] || null;
+          const ins = inserts[j] || null;
+          pairs.push({
+            left: del,
+            right: ins,
+            lineNum: ins?.newLineNumber || del?.oldLineNumber,
+          });
+        }
+      } else if (line.type === "insert") {
+        pairs.push({ left: null, right: line, lineNum: line.newLineNumber });
+        i++;
+      }
+    }
+    return pairs;
+  }
+
   test("indentation-only content re-paired after crossing unpairing", () => {
     // Rotate three content-identical lines.  D1→I3, D2→I1, D3→I2 cross;
     // crossing unpaips D1→I3 (larger line distance).  The second pass must

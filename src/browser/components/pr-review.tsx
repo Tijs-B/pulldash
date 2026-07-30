@@ -1971,15 +1971,9 @@ const DiffViewer = memo(function DiffViewer({
         const line = lines[i];
 
         if (line.type === "normal") {
-          // Check if this is a merged modified line with inline word-diff segments
           const hasWordDiff = line.content.some((s) => s.type !== "normal");
           if (hasWordDiff) {
-            // LEFT side: keep non-insert segments (normal + delete),
-            // preserving syntax-highlighted HTML from the original segments.
             const leftContent = line.content.filter((s) => s.type !== "insert");
-
-            // Recover leading whitespace that diffWords may have absorbed
-            // into an INSERT token (e.g. indentation).
             const leftRaw = leftContent.map((s) => s.value).join("");
             const rightRaw = line.content
               .filter((s) => s.type !== "delete")
@@ -1999,27 +1993,16 @@ const DiffViewer = memo(function DiffViewer({
               });
             }
 
-            // RIGHT side: keep non-delete segments (normal + insert),
-            // preserving syntax-highlighted HTML.
             const rightContent = line.content.filter(
               (s) => s.type !== "delete"
             );
 
             pairs.push({
-              left: {
-                ...line,
-                type: "delete",
-                content: leftContent,
-              },
-              right: {
-                ...line,
-                type: "insert",
-                content: rightContent,
-              },
+              left: { ...line, type: "delete", content: leftContent },
+              right: { ...line, type: "insert", content: rightContent },
               lineNum: line.oldLineNumber || line.newLineNumber,
             });
           } else {
-            // Context line - show on both sides
             pairs.push({
               left: line,
               right: line,
@@ -2028,21 +2011,16 @@ const DiffViewer = memo(function DiffViewer({
           }
           i++;
         } else if (line.type === "delete") {
-          // Collect consecutive deletes
           const deletes: DiffLine[] = [];
           while (i < lines.length && lines[i].type === "delete") {
             deletes.push(lines[i]);
             i++;
           }
-
-          // Collect consecutive inserts that follow
           const inserts: DiffLine[] = [];
           while (i < lines.length && lines[i].type === "insert") {
             inserts.push(lines[i]);
             i++;
           }
-
-          // Pair them up
           const maxLen = Math.max(deletes.length, inserts.length);
           for (let j = 0; j < maxLen; j++) {
             const del = deletes[j] || null;
@@ -2054,7 +2032,6 @@ const DiffViewer = memo(function DiffViewer({
             });
           }
         } else if (line.type === "insert") {
-          // Standalone insert (no preceding delete)
           pairs.push({
             left: null,
             right: line,
@@ -2167,6 +2144,27 @@ const DiffViewer = memo(function DiffViewer({
       } else {
         const artifact = hunk.isRebaseArtifact;
         if (viewMode === "split") {
+          // DEBUG: log all lines for every hunk
+          if (hunk.lines && hunk.lines.length > 0) {
+            const firstOld = hunk.lines.find(
+              (l: any) => l.oldLineNumber != null
+            )?.oldLineNumber;
+            const firstNew = hunk.lines.find(
+              (l: any) => l.newLineNumber != null
+            )?.newLineNumber;
+            console.log(
+              `DEBUG hunk lines (firstOld=${firstOld}, firstNew=${firstNew}, count=${hunk.lines.length}):`
+            );
+            hunk.lines.forEach((l: any, i: number) => {
+              const t = l.type;
+              const o = l.oldLineNumber ?? l.lineNumber ?? "?";
+              const n = l.newLineNumber ?? "?";
+              const v = l.content?.map((s: any) => s.value).join("") ?? "";
+              console.log(
+                `  [${i}] ${t} old=${o} new=${n} content="${v.substring(0, 80)}"`
+              );
+            });
+          }
           // Convert to split pairs
           const pairs = convertToSplitPairs(hunk.lines);
           for (const pair of pairs) {
