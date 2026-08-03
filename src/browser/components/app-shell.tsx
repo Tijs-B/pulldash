@@ -8,6 +8,8 @@ import {
   GitMerge,
   GitPullRequest,
   ExternalLink,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "../cn";
 import {
@@ -126,6 +128,57 @@ export function AppShell() {
   const queryClient = useQueryClient();
   const githubStore = useGitHubStore();
 
+  const tabScrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const updateScrollArrows = useCallback(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 1);
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  }, []);
+
+  // Track scroll position + container width to show/hide the arrow buttons.
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    updateScrollArrows();
+    el.addEventListener("scroll", updateScrollArrows, { passive: true });
+    const observer = new ResizeObserver(updateScrollArrows);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", updateScrollArrows);
+      observer.disconnect();
+    };
+  }, [updateScrollArrows]);
+
+  // Recompute arrows whenever the set of tabs changes (add/close/order).
+  useEffect(() => {
+    updateScrollArrows();
+  }, [tabs, updateScrollArrows]);
+
+  // Keep the active tab visible when it's selected via shortcut, click, or focus.
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    const active = el.querySelector('[data-active="true"]');
+    active?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [activeTabId, tabs]);
+
+  // Map vertical mouse-wheel to horizontal scrolling of the tab strip.
+  useEffect(() => {
+    const el = tabScrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return;
+      el.scrollLeft += e.deltaY + e.deltaX;
+      e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   // URL is the source of truth - sync URL → Tab
   useEffect(() => {
     if (params.owner && params.repo && params.number) {
@@ -206,6 +259,14 @@ export function AppShell() {
   // Handle keyboard shortcuts for tab switching
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore when typing in inputs/textareas
+      const target = e.target as HTMLElement | null;
+      const isTyping =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+
       // Cmd/Ctrl + number to switch tabs
       if ((e.metaKey || e.ctrlKey) && e.key >= "1" && e.key <= "9") {
         e.preventDefault();
@@ -220,6 +281,20 @@ export function AppShell() {
           e.preventDefault();
           handleTabClose(activeTabId);
         }
+      }
+      // Cmd/Ctrl + Shift + ←/→ to cycle previous / next tab
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        e.shiftKey &&
+        (e.key === "ArrowLeft" || e.key === "ArrowRight")
+      ) {
+        if (isTyping) return;
+        e.preventDefault();
+        const currentIndex = tabs.findIndex((t) => t.id === activeTabId);
+        if (currentIndex === -1) return;
+        const delta = e.key === "ArrowRight" ? 1 : -1;
+        const nextIndex = (currentIndex + delta + tabs.length) % tabs.length;
+        handleTabSelect(tabs[nextIndex]);
       }
     };
 
@@ -426,16 +501,43 @@ export function AppShell() {
         </div>
 
         {/* Tabs */}
-        <div className="h-full flex-1 flex items-center gap-0.5 overflow-x-auto hide-scrollbar">
-          {tabs.map((tab) => (
-            <TabItem
-              key={tab.id}
-              tab={tab}
-              isActive={tab.id === activeTabId}
-              onSelect={() => handleTabSelect(tab)}
-              onClose={() => handleTabClose(tab.id)}
+        <div className="h-full flex-1 flex items-center min-w-0">
+          {canScrollLeft && (
+            <TabScrollButton
+              dir="left"
+              onClick={() =>
+                tabScrollRef.current?.scrollBy({
+                  left: -200,
+                  behavior: "smooth",
+                })
+              }
             />
-          ))}
+          )}
+          <div
+            ref={tabScrollRef}
+            className="h-full flex-1 flex items-center gap-0.5 overflow-x-auto hide-scrollbar"
+          >
+            {tabs.map((tab) => (
+              <TabItem
+                key={tab.id}
+                tab={tab}
+                isActive={tab.id === activeTabId}
+                onSelect={() => handleTabSelect(tab)}
+                onClose={() => handleTabClose(tab.id)}
+              />
+            ))}
+          </div>
+          {canScrollRight && (
+            <TabScrollButton
+              dir="right"
+              onClick={() =>
+                tabScrollRef.current?.scrollBy({
+                  left: 200,
+                  behavior: "smooth",
+                })
+              }
+            />
+          )}
         </div>
 
         {/* PR URL input & User menu */}
@@ -498,6 +600,26 @@ export function AppShell() {
 // Tab Item
 // ============================================================================
 
+interface TabScrollButtonProps {
+  dir: "left" | "right";
+  onClick: () => void;
+}
+
+function TabScrollButton({ dir, onClick }: TabScrollButtonProps) {
+  const Icon = dir === "left" ? ChevronLeft : ChevronRight;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={dir === "left" ? "Scroll tabs left" : "Scroll tabs right"}
+      title={dir === "left" ? "Scroll tabs left" : "Scroll tabs right"}
+      className="h-full shrink-0 px-1 text-muted-foreground hover:text-foreground hover:bg-white/5 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    >
+      <Icon className="w-4 h-4" />
+    </button>
+  );
+}
+
 interface TabItemProps {
   tab: Tab;
   isActive: boolean;
@@ -530,6 +652,7 @@ function TabItem({ tab, isActive, onSelect, onClose }: TabItemProps) {
     <div
       role="button"
       tabIndex={0}
+      data-active={isActive}
       onClick={onSelect}
       onMouseDown={handleMiddleClick}
       onKeyDown={(e) => {

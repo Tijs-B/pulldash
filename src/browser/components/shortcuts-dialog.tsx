@@ -39,6 +39,10 @@ const SECTIONS: ShortcutSection[] = [
       },
       { keys: [[["cmd", "1"]]], description: "Switch to tab 1–9" },
       { keys: [[["cmd", "w"]]], description: "Close current tab" },
+      {
+        keys: [[["cmd", "shift", "left"]], [["cmd", "shift", "right"]]],
+        description: "Previous / next tab",
+      },
     ],
   },
   {
