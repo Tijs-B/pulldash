@@ -282,6 +282,17 @@ function buildChangeIndices(changes: _Change[]) {
   return { insertIdxs, deleteIdxs };
 }
 
+// A delete and an insert separated by a context (normal) line belong to
+// different change groups in the diff: git treats them as independent edits.
+// Merging them across the context line mispositions the merged row and makes
+// one of the gutter columns non-monotonic, so such pairs are never formed.
+function hasContextBetween(changes: _Change[], delIdx: number, addIdx: number) {
+  for (let i = delIdx + 1; i < addIdx; i++) {
+    if (changes[i].type === "normal") return true;
+  }
+  return false;
+}
+
 function findBestInsertForDelete(
   changes: _Change[],
   delIdx: number,
@@ -299,6 +310,7 @@ function findBestInsertForDelete(
     const add = changes[addIdx] as InsertChange;
     if (pairOfAdd[addIdx] !== UNPAIRED) continue;
     if (addIdx < delIdx) continue;
+    if (hasContextBetween(changes, delIdx, addIdx)) continue;
 
     const ratio = calculateChangeRatio(del.content, add.content);
     if (ratio > options.maxChangeRatio) continue;
@@ -388,56 +400,50 @@ function detectAndUnpairCrossings(
   }
 }
 
-function unpairCrossingContextLines(
-  changes: _Change[],
-  pairOfDel: Int32Array,
-  pairOfAdd: Int32Array,
-  deleteIdxs: number[]
-) {
-  for (const di of deleteIdxs) {
-    const ai = pairOfDel[di];
-    if (ai === UNPAIRED) continue;
-    const del = changes[di] as DeleteChange;
-    const add = changes[ai] as InsertChange;
-    const delOld = del.lineNumber;
-    const addNew = add.lineNumber;
-    const lo = Math.min(delOld, addNew);
-    const hi = Math.max(delOld, addNew);
+// Rows are ordered by their position in the NEW file so the new-side gutter
+// always reads monotonically: context, insert and merged rows are keyed by
+// their new line number. Unpaired deletes (which have no new line number) are
+// keyed just past the nearest row that has a new line number and precedes them
+// in the OLD file, so both gutters stay monotonic; when no such row exists
+// (delete before the hunk's first new-side line) the hunk's old→new delta is
+// used as a fallback. The sort is stable, so rows that share a key keep their
+// original diff order (deletes before inserts within a change group).
+function computeSortKeys(rows: Line[], delta: number) {
+  const newSide: { old: number; new: number }[] = [];
+  for (const line of rows) {
+    const n = (line as any).newLineNumber;
+    const o = (line as any).oldLineNumber;
+    if (n != null && o != null) newSide.push({ old: o, new: n });
+  }
+  newSide.sort((a, b) => a.old - b.old);
 
-    for (let i = di + 1; i < ai; i++) {
-      const c = changes[i];
-      if (c.type !== "normal") continue;
-      const ctxOld = (c as any).oldLineNumber;
-      const ctxNew = (c as any).newLineNumber;
-      if (ctxOld == null || ctxNew == null) continue;
-      const oldBetween = ctxOld > lo && ctxOld < hi;
-      const newBetween = ctxNew > lo && ctxNew < hi;
-      if (oldBetween && !newBetween) {
-        pairOfDel[di] = UNPAIRED;
-        pairOfAdd[ai] = UNPAIRED;
-        return unpairCrossingContextLines(
-          changes,
-          pairOfDel,
-          pairOfAdd,
-          deleteIdxs
-        );
+  for (const line of rows) {
+    const n = (line as any).newLineNumber;
+    if (n != null) {
+      (line as any)._sortKey = n;
+      continue;
+    }
+    const old = (line as any).oldLineNumber ?? (line as any).lineNumber ?? 0;
+    let key: number | null = null;
+    for (let i = newSide.length - 1; i >= 0; i--) {
+      if (newSide[i].old <= old) {
+        key = newSide[i].new + 0.5;
+        break;
       }
     }
+    (line as any)._sortKey = key ?? old + delta;
   }
 }
 
-function emitNormal(out: Line[], c: _Change, sortIdx: number) {
-  const line = changeToLine(c);
-  (line as any)._sortIdx = sortIdx;
-  out.push(line);
+function emitNormal(out: Line[], c: _Change) {
+  out.push(changeToLine(c));
 }
 
 function emitModified(
   out: Line[],
   del: DeleteChange,
   add: InsertChange,
-  options: ParseOptions,
-  sortIdx: number
+  options: ParseOptions
 ) {
   out.push({
     oldLineNumber: del.lineNumber,
@@ -450,14 +456,14 @@ function emitModified(
       options.inlineMaxCharEdits
     ),
   });
-  (out[out.length - 1] as any)._sortIdx = sortIdx;
 }
 
 function emitLines(
   changes: _Change[],
   pairOfDel: Int32Array,
   pairOfAdd: Int32Array,
-  options: ParseOptions
+  options: ParseOptions,
+  delta: number
 ): Line[] {
   const out: Line[] = [];
   const unpairedInserts: Line[] = [];
@@ -469,15 +475,15 @@ function emitLines(
 
     if (c.type === "normal") {
       processed[i] = 1;
-      emitNormal(out, c, i);
+      emitNormal(out, c);
     } else if (c.type === "delete") {
       const pairedAddIdx = pairOfDel[i];
       if (pairedAddIdx === UNPAIRED) {
         processed[i] = 1;
-        emitNormal(out, c, i);
+        emitNormal(out, c);
       } else {
         const add = changes[pairedAddIdx] as InsertChange;
-        emitModified(out, c, add, options, i);
+        emitModified(out, c, add, options);
         processed[i] = 1;
         processed[pairedAddIdx] = 1;
       }
@@ -485,12 +491,10 @@ function emitLines(
       const pairedDelIdx = pairOfAdd[i];
       if (pairedDelIdx === UNPAIRED) {
         processed[i] = 1;
-        const line = changeToLine(c);
-        (line as any)._sortIdx = i;
-        unpairedInserts.push(line);
+        unpairedInserts.push(changeToLine(c));
       } else {
         const del = changes[pairedDelIdx] as DeleteChange;
-        emitModified(out, del, c, options, pairedDelIdx);
+        emitModified(out, del, c, options);
         processed[i] = 1;
         processed[pairedDelIdx] = 1;
       }
@@ -498,10 +502,11 @@ function emitLines(
   }
 
   const result = [...out, ...unpairedInserts];
+  computeSortKeys(result, delta);
   result.sort((a, b) => {
-    const aIdx = (a as any)._sortIdx ?? -Infinity;
-    const bIdx = (b as any)._sortIdx ?? -Infinity;
-    return aIdx - bIdx;
+    const aKey = (a as any)._sortKey ?? -Infinity;
+    const bKey = (b as any)._sortKey ?? -Infinity;
+    return aKey - bKey;
   });
 
   for (let i = 0; i < result.length - 1; i++) {
@@ -538,7 +543,8 @@ function emitLines(
 
 export function mergeModifiedLines(
   changes: _Change[],
-  options: ParseOptions
+  options: ParseOptions,
+  delta = 0
 ): Line[] {
   const { insertIdxs, deleteIdxs } = buildChangeIndices(changes);
   const { pairOfDel, pairOfAdd } = buildInitialPairs(
@@ -568,6 +574,7 @@ export function mergeModifiedLines(
     for (const ai of insertIdxs) {
       if (pairOfAdd[ai] !== UNPAIRED) continue;
       if (ai < di) continue;
+      if (hasContextBetween(changes, di, ai)) continue;
       const add = changes[ai] as InsertChange;
       if (del.content.trim() !== add.content.trim()) continue;
       if (del.content.trim() === "") continue;
@@ -587,9 +594,7 @@ export function mergeModifiedLines(
     }
   }
 
-  unpairCrossingContextLines(changes, pairOfDel, pairOfAdd, deleteIdxs);
-
-  return emitLines(changes, pairOfDel, pairOfAdd, options);
+  return emitLines(changes, pairOfDel, pairOfAdd, options, delta);
 }
 
 function wouldCreateCrossing(
@@ -629,7 +634,7 @@ const parseHunk = (hunk: _Hunk, options: ParseOptions): Hunk => {
     ...hunk,
     type: "hunk",
     lines: options.mergeModifiedLines
-      ? mergeModifiedLines(hunk.changes, options)
+      ? mergeModifiedLines(hunk.changes, options, hunk.newStart - hunk.oldStart)
       : hunk.changes.map(changeToLine),
   };
 };

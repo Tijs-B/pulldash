@@ -327,6 +327,80 @@ describe("parse-diff message", () => {
     expect(posted[0].result.hunks.length).toBeGreaterThan(0);
   });
 
+  test("no skip block when hunks are contiguous from line 1", () => {
+    const patch = [
+      "@@ -1,3 +1,3 @@",
+      " context",
+      "-old",
+      "+new",
+      " context",
+    ].join("\n");
+
+    handler({
+      data: { type: "parse-diff", id: "no-skip", patch, filename: "test.ts" },
+    });
+
+    const hunks = posted[0].result.hunks;
+    expect(hunks.some((h: any) => h.type === "skip")).toBe(false);
+  });
+
+  test("skip block count equals the gap between hunks", () => {
+    // First hunk ends at line 3, second starts at line 10 → gap of 6
+    const patch = [
+      "@@ -1,3 +1,3 @@",
+      " line1",
+      "-line2",
+      "+line2x",
+      " line3",
+      "@@ -10,3 +10,3 @@",
+      " line10",
+      "-line11",
+      "+line11x",
+      " line12",
+    ].join("\n");
+
+    handler({
+      data: {
+        type: "parse-diff",
+        id: "skip-gap",
+        patch,
+        filename: "test.ts",
+      },
+    });
+
+    const hunks = posted[0].result.hunks;
+    expect(hunks).toHaveLength(3);
+    expect(hunks[1].type).toBe("skip");
+    expect(hunks[1].count).toBe(6); // 10 - 4 = 6 (lastHunkLine = oldStart(1) + oldLines(3) = 4)
+  });
+
+  test("skip block uses hunk context from header", () => {
+    const patch = [
+      "@@ -1,2 +1,2 @@",
+      "-a",
+      "+A",
+      " b",
+      "@@ -20,2 +20,2 @@ function foo() {",
+      "-x",
+      "+X",
+      " y",
+    ].join("\n");
+
+    handler({
+      data: {
+        type: "parse-diff",
+        id: "skip-ctx",
+        patch,
+        filename: "test.ts",
+      },
+    });
+
+    const hunks = posted[0].result.hunks;
+    const skip = hunks.find((h: any) => h.type === "skip");
+    expect(skip).toBeDefined();
+    expect(skip.content).toBe("function foo() {");
+  });
+
   test("uses full-file context so a hunk after a closing raw string highlights code as code", () => {
     // Reproduces the reported bug: a Rust hunk that begins after a raw-string
     // terminator (`"#);`) was fed to the highlighter as a fragment starting
@@ -500,6 +574,41 @@ describe("highlight-lines message", () => {
     expect(posted[0].result).toHaveLength(2);
     expect(posted[0].result[0].newLineNumber).toBe(4);
     expect(posted[0].result[1].newLineNumber).toBe(5);
+  });
+
+  test("each line has a single content segment with html", () => {
+    handler({
+      data: {
+        type: "highlight-lines",
+        id: "segment-1",
+        content: "const x = 1;",
+        filename: "test.ts",
+        startLine: 1,
+        oldStartLine: 1,
+        count: 1,
+      },
+    });
+
+    expect(posted[0].result).toHaveLength(1);
+    expect(posted[0].result[0].content).toHaveLength(1);
+    expect(typeof posted[0].result[0].content[0].html).toBe("string");
+  });
+
+  test("guesses language from extension for syntax highlighting", () => {
+    handler({
+      data: {
+        type: "highlight-lines",
+        id: "lang-1",
+        content: "function foo() { return 1; }",
+        filename: "script.js",
+        startLine: 1,
+        oldStartLine: 1,
+        count: 1,
+      },
+    });
+
+    // With JS syntax highlighting, html will contain span tags
+    expect(posted[0].result[0].content[0].html).toContain("function");
   });
 });
 
@@ -799,6 +908,69 @@ describe("error propagation", () => {
     expect(pair31).toBeDefined();
   });
 
+  test("does not pair delete with insert from a different section that happens to have identical content", () => {
+    // A new function is inserted with param `x`, then an existing function
+    // has param `x` removed and `y` added. The delete of `x` must NOT pair
+    // with the insert of `x` in the new function — only the delete of the
+    // existing `x` (old=4) with the insert of `y` (new=9).
+    const hunkBody = [
+      "@@ -1,5 +1,11 @@",
+      " context1",
+      " context2",
+      "+def new_func(",
+      "+    x: str,",
+      "+):",
+      "+    pass",
+      "+",
+      " def existing_func(",
+      "-    x: str,",
+      "+    y: str,",
+      "     other: str,",
+    ].join("\n");
+    const patch = [
+      "diff --git a/file.py b/file.py",
+      "--- a/file.py",
+      "+++ b/file.py",
+      hunkBody,
+    ].join("\n");
+
+    const files = gitDiffParser.parse(patch);
+    expect(files.length).toBeGreaterThanOrEqual(1);
+    const hunk = files[0].hunks[0];
+    expect(hunk).toBeDefined();
+
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+    const lines = mergeModifiedLines(hunk.changes, opts);
+
+    // The `x: str` of the new function must remain a separate insert.
+    const insertX = lines.find(
+      (l: any) => l.type === "insert" && l.newLineNumber === 4
+    );
+    expect(insertX).toBeDefined();
+
+    // The delete of the existing `x` (old=4) merges with the insert of
+    // `y` (new=9) into a single modified line.
+    const mergedLine = lines.find(
+      (l: any) =>
+        l.type === "normal" && l.oldLineNumber === 4 && l.newLineNumber === 9
+    );
+    expect(mergedLine).toBeDefined();
+    if (mergedLine) {
+      const segments = mergedLine.content;
+      expect(
+        segments.some((s: any) => s.type === "delete" && s.value === "x")
+      ).toBe(true);
+      expect(
+        segments.some((s: any) => s.type === "insert" && s.value === "y")
+      ).toBe(true);
+    }
+  });
+
   test("indentation-only try lines merge in the full import_srpm diff", () => {
     const diffContent = `diff --git a/scripts/import_srpm.py b/scripts/import_srpm.py\n--- a/scripts/import_srpm.py\n+++ b/scripts/import_srpm.py\n${patchForImportSrpm}`;
     const files = gitDiffParser.parse(diffContent);
@@ -812,7 +984,11 @@ describe("error propagation", () => {
       mergeModifiedLines: true,
       inlineMaxCharEdits: 30,
     };
-    const lines = mergeModifiedLines(thirdHunk.changes, opts);
+    const lines = mergeModifiedLines(
+      thirdHunk.changes,
+      opts,
+      thirdHunk.newStart - thirdHunk.oldStart
+    );
 
     // Find old=139 in any form
     const try139norm = lines.find(
@@ -954,8 +1130,10 @@ describe("error propagation", () => {
   test("standalone del/ins lines produce monotonic new-line numbers in all-deletes-first blocks", () => {
     // A block replacement where all deletes precede all inserts.
     // With maxChangeRatio=0.45, different-content lines won't pair,
-    // so they remain as standalone deletes and inserts.  Sort-by-index
-    // keeps lines in original changes order (deletes then inserts).
+    // so they remain as standalone deletes and inserts. Deletes are
+    // positioned right after the preceding new-side row, so the order
+    // reads context1, apple, banana, cherry, date, context2 — GitHub's
+    // deletes-then-inserts order — with both gutters monotonic.
     const patch = [
       "@@ -1,4 +1,4 @@",
       " context1",
@@ -989,9 +1167,19 @@ describe("error propagation", () => {
       }
     }
 
-    // Lines are sorted by their original index in the changes array.
-    // Unpaired deletes and inserts appear in the order they were in the
-    // original diff (deletes then inserts, within each group in file order).
+    // All old-line-number values must be non-decreasing as well.
+    let prevOld: number | null = null;
+    for (const l of lines) {
+      if (l.type === "insert") continue;
+      const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+      if (o != null) {
+        if (prevOld != null) {
+          expect(o).toBeGreaterThanOrEqual(prevOld);
+        }
+        prevOld = o;
+      }
+    }
+
     const appleDel = lines.find(
       (l: any) => l.type === "delete" && l.content[0]?.value === "apple"
     );
@@ -1009,19 +1197,16 @@ describe("error propagation", () => {
     expect(bananaDel).toBeDefined();
     expect(dateIns).toBeDefined();
 
-    // apple (idx=1) sorts before cherry (idx=3) because it appeared
-    // first in the original changes array.
+    // Deletes share the key of the preceding context row (plus a half-step),
+    // and ties keep original diff order, so apple and banana sort before
+    // cherry and date, in GitHub's deletes-then-inserts order.
     const appleIdx = lines.indexOf(appleDel!);
     const cherryIdx = lines.indexOf(cherryIns!);
     expect(appleIdx).toBeLessThan(cherryIdx);
 
-    // banana (idx=2) sorts before cherry (idx=3) because deletes
-    // precede inserts in original diff order.
     const bananaIdx = lines.indexOf(bananaDel!);
     expect(bananaIdx).toBeLessThan(cherryIdx);
 
-    // banana (idx=2) sorts before date (idx=4) — both are in
-    // original changes order.
     const dateIdx = lines.indexOf(dateIns!);
     expect(bananaIdx).toBeLessThan(dateIdx);
   });
@@ -1029,7 +1214,7 @@ describe("error propagation", () => {
   test("delete-only line positioned after its surrounding paired lines", () => {
     // A standalone delete (old=3) surrounded by paired lines above and below
     // must be placed between them — its estimated position comes from the
-    // next paired line's new-line number.
+    // preceding paired line's new-line number.
     // "hello world" → "hello_world" pairs (ratio ≈ 0.17 < 0.45).
     // "standalone" is unpaired.
     // "foo bar" → "foo baz" pairs via calculateChangeRatio
@@ -1079,13 +1264,14 @@ describe("error propagation", () => {
     expect(delIdx).toBeLessThan(afterIdx);
   });
 
-  test("old-line numbers are monotonic when modified line shifts past a following context line", () => {
-    // A modified line (old=2, new=3) and a context line (old=3, new=2)
-    // cause the left gutter to show 3 then 2 when sorted by new-line
-    // number.  Sort-by-index preserves original diff order so old-line
-    // numbers remain monotonic even when new-line numbers are not.
+  test("delete and insert separated by a context line stay separate rows", () => {
+    // A context line between a delete and an insert means they belong to
+    // different change groups: git treats them as independent edits. Merging
+    // them across the context line mispositions the merged row and makes one
+    // gutter column non-monotonic, so they must remain separate rows:
     //   old: A(1), "foo bar"(2), C(3), D(4)
     //   new: A(1), C(2), "foo baz"(3), D(4)
+    // displayed as A, -foo bar, C, +foo baz, D (both gutters monotonic).
     const patch = [
       "@@ -1,4 +1,4 @@",
       " A",
@@ -1107,7 +1293,33 @@ describe("error propagation", () => {
     };
     const lines = mergeModifiedLines(changes, opts);
 
-    // Old-line numbers must be non-decreasing (source column ordering)
+    // No merge: the delete and the insert remain separate rows.
+    const merged = lines.find(
+      (l: any) => l.type === "normal" && l.content.length > 1
+    );
+    expect(merged).toBeUndefined();
+
+    const deleteRow = lines.find(
+      (l: any) => l.type === "delete" && l.oldLineNumber === 2
+    );
+    const insertRow = lines.find(
+      (l: any) => l.type === "insert" && l.newLineNumber === 3
+    );
+    const contextRow = lines.find(
+      (l: any) => l.type === "normal" && l.oldLineNumber === 3
+    );
+    expect(deleteRow).toBeDefined();
+    expect(insertRow).toBeDefined();
+    expect(contextRow).toBeDefined();
+
+    // Order: A, -foo bar, C(3/2), +foo baz, D
+    const deleteIdx = lines.indexOf(deleteRow!);
+    const contextIdx = lines.indexOf(contextRow!);
+    const insertIdx = lines.indexOf(insertRow!);
+    expect(deleteIdx).toBeLessThan(contextIdx);
+    expect(contextIdx).toBeLessThan(insertIdx);
+
+    // Both gutters must be monotonic.
     let prevOld: number | null = null;
     for (const l of lines) {
       if (l.type === "insert") continue;
@@ -1119,14 +1331,220 @@ describe("error propagation", () => {
         prevOld = o;
       }
     }
+    let prevNew: number | null = null;
+    for (const l of lines) {
+      const n = (l as any).newLineNumber;
+      if (n != null) {
+        if (prevNew != null) {
+          expect(n).toBeGreaterThanOrEqual(prevNew);
+        }
+        prevNew = n;
+      }
+    }
+  });
 
-    // Verify the merged line has correct old/new pair (old=2, new=3)
-    const merged = lines.find(
-      (l: any) =>
-        l.type === "normal" && l.oldLineNumber === 2 && l.newLineNumber === 3
+  test("pure insert above a modified line keeps new-side line numbers monotonic", () => {
+    // Regression: xcp-ng/xcp-ng-tests PR 658, commit 519ece39. A decorator
+    // added directly above a modified function signature used to render AFTER
+    // the merged modified row, so the new-file gutter read 79, 78 (the merged
+    // row was anchored at its delete's position in the changes array).
+    const patch = [
+      "@@ -75,13 +75,14 @@",
+      "     def test_drivers_detected(self, vm_install_test_tools_per_test_class: VM) -> None:",
+      "         pass",
+      " ",
+      "-    def test_vif_replug(self, vm_install_test_tools_per_test_class: VM) -> None:",
+      '+    @pytest.mark.parametrize("force", (False, True))',
+      "+    def test_vif_replug(self, vm_install_test_tools_per_test_class: VM, force: bool) -> None:",
+      "         vm = vm_install_test_tools_per_test_class",
+      "         for _iter in range(3):",
+      "             vifs = vm.vifs()",
+      "             for vif in vifs:",
+      '                 assert strtobool(vif.param_get("currently-attached"))',
+      "-                vif.unplug()",
+      "+                vif.unplug(force=force)",
+      "                 # HACK: Allow some time for the unplug to settle. If not, Windows guests have a tendency to explode.",
+      "                 # TODO reference: XCPNG-1395",
+      '                 assert not strtobool(vif.param_get("currently-attached"))',
+    ].join("\n");
+
+    const diffContent = `diff --git a/tests/guest_tools/win/test_guest_tools_win.py b/tests/guest_tools/win/test_guest_tools_win.py\n--- a/tests/guest_tools/win/test_guest_tools_win.py\n+++ b/tests/guest_tools/win/test_guest_tools_win.py\n${patch}`;
+    const files = gitDiffParser.parse(diffContent);
+    const changes = files[0].hunks[0].changes;
+
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+    const lines = mergeModifiedLines(changes, opts);
+
+    // The decorator (new 78) must render BEFORE the merged def (old 78/new 79).
+    const decorator = lines.find(
+      (l: any) => l.type === "insert" && l.newLineNumber === 78
     );
-    expect(merged).toBeDefined();
-    expect(merged!.content.length).toBeGreaterThan(1);
+    const mergedDef = lines.find(
+      (l: any) =>
+        l.type === "normal" && l.oldLineNumber === 78 && l.newLineNumber === 79
+    );
+    expect(decorator).toBeDefined();
+    expect(mergedDef).toBeDefined();
+    expect(lines.indexOf(decorator!)).toBeLessThan(lines.indexOf(mergedDef!));
+
+    // The modified vif.unplug line is still merged as a word-diff.
+    const mergedUnplug = lines.find(
+      (l: any) =>
+        l.type === "normal" &&
+        l.oldLineNumber === 84 &&
+        l.newLineNumber === 85 &&
+        l.content.length > 1
+    );
+    expect(mergedUnplug).toBeDefined();
+
+    // Both gutters must be monotonic for the whole hunk.
+    let prevOld: number | null = null;
+    for (const l of lines) {
+      if (l.type === "insert") continue;
+      const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+      if (o != null) {
+        if (prevOld != null) {
+          expect(o).toBeGreaterThanOrEqual(prevOld);
+        }
+        prevOld = o;
+      }
+    }
+    let prevNew: number | null = null;
+    for (const l of lines) {
+      const n = (l as any).newLineNumber;
+      if (n != null) {
+        if (prevNew != null) {
+          expect(n).toBeGreaterThanOrEqual(prevNew);
+        }
+        prevNew = n;
+      }
+    }
+  });
+
+  test("new-side line numbers stay monotonic across a corpus of real hunks", () => {
+    // The new-file gutter is the primary reading column: whatever the diff
+    // shape (pure inserts above modified lines, re-indents, standalone
+    // deletes, rotations), the new-side line numbers of rendered rows must
+    // never go backwards. Old-side numbers must stay monotonic too, except
+    // for complete permutations (rotations of identical lines), where the
+    // two orders are inherently incompatible.
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+
+    const corpus: { name: string; patch: string; rotation?: boolean }[] = [
+      {
+        name: "decorator above modified signature (xcp-ng PR 658)",
+        patch: [
+          "@@ -75,13 +75,14 @@",
+          "     def test_drivers_detected(self, vm_install_test_tools_per_test_class: VM) -> None:",
+          "         pass",
+          " ",
+          "-    def test_vif_replug(self, vm_install_test_tools_per_test_class: VM) -> None:",
+          '+    @pytest.mark.parametrize("force", (False, True))',
+          "+    def test_vif_replug(self, vm_install_test_tools_per_test_class: VM, force: bool) -> None:",
+          "         vm = vm_install_test_tools_per_test_class",
+          "         for _iter in range(3):",
+          "             vifs = vm.vifs()",
+          "             for vif in vifs:",
+          '                 assert strtobool(vif.param_get("currently-attached"))',
+          "-                vif.unplug()",
+          "+                vif.unplug(force=force)",
+          "                 # HACK: Allow some time for the unplug to settle. If not, Windows guests have a tendency to explode.",
+          "                 # TODO reference: XCPNG-1395",
+          '                 assert not strtobool(vif.param_get("currently-attached"))',
+        ].join("\n"),
+      },
+      {
+        name: "delete and insert split by context",
+        patch: [
+          "@@ -1,4 +1,4 @@",
+          " A",
+          "-foo bar",
+          " C",
+          "+foo baz",
+          " D",
+        ].join("\n"),
+      },
+      {
+        name: "block replacement, nothing pairs",
+        patch: [
+          "@@ -1,4 +1,4 @@",
+          " context1",
+          "-apple",
+          "-banana",
+          "+cherry",
+          "+date",
+          " context2",
+        ].join("\n"),
+      },
+      {
+        name: "standalone delete between merged pairs",
+        patch: [
+          "@@ -1,6 +1,5 @@",
+          " context1",
+          "-hello world",
+          "+hello_world",
+          "-standalone",
+          "-foo bar",
+          "+foo baz",
+          " context2",
+        ].join("\n"),
+      },
+      {
+        name: "rotation of identical lines",
+        patch: [
+          "@@ -1,3 +1,3 @@",
+          "-foo",
+          "-bar",
+          "-baz",
+          "+bar",
+          "+baz",
+          "+foo",
+        ].join("\n"),
+        rotation: true,
+      },
+    ];
+
+    for (const { patch, rotation } of corpus) {
+      const diffContent = `diff --git a/file b/file\n--- a/file\n+++ b/file\n${patch}`;
+      const files = gitDiffParser.parse(diffContent);
+      const changes = files[0].hunks[0].changes;
+      const lines = mergeModifiedLines(changes, opts);
+
+      let prevNew: number | null = null;
+      for (const l of lines) {
+        const n = (l as any).newLineNumber;
+        if (n != null) {
+          if (prevNew != null) {
+            expect(n).toBeGreaterThanOrEqual(prevNew);
+          }
+          prevNew = n;
+        }
+      }
+
+      if (!rotation) {
+        let prevOld: number | null = null;
+        for (const l of lines) {
+          if (l.type === "insert") continue;
+          const o = (l as any).oldLineNumber ?? (l as any).lineNumber;
+          if (o != null) {
+            if (prevOld != null) {
+              expect(o).toBeGreaterThanOrEqual(prevOld);
+            }
+            prevOld = o;
+          }
+        }
+      }
+    }
   });
 
   test("adjacent empty delete+insert lines merge into one normal line", () => {
@@ -1162,6 +1580,80 @@ describe("error propagation", () => {
     expect(lines[2].type).toBe("normal");
     expect((lines[2] as any).newLineNumber).toBe(3);
     expect(lines[2].content[0]?.value).toBe("two");
+  });
+
+  test("calculateChangeRatio boundaries: identical merges at ratio 0, dissimilar does not at a tight threshold", () => {
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 30,
+    };
+
+    // Identical content has ratio 0 → merges even at maxChangeRatio=0.
+    const identical = mergeModifiedLines(
+      [
+        { type: "delete", lineNumber: 1, content: "identical" },
+        { type: "insert", lineNumber: 1, content: "identical" },
+      ] as any[],
+      { ...opts, maxChangeRatio: 0 }
+    );
+    expect(identical).toHaveLength(1);
+    expect(identical[0].type).toBe("normal");
+
+    // Completely different content has ratio ~1 → stays separate even at
+    // a tight threshold (0.01).
+    const dissimilar = mergeModifiedLines(
+      [
+        { type: "delete", lineNumber: 1, content: "aaaaaa" },
+        { type: "insert", lineNumber: 1, content: "bbbbbb" },
+      ] as any[],
+      { ...opts, maxChangeRatio: 0.01 }
+    );
+    expect(dissimilar).toHaveLength(2);
+    expect(dissimilar[0].type).toBe("delete");
+    expect(dissimilar[1].type).toBe("insert");
+  });
+
+  test("inlineMaxCharEdits boundary: char-level segments within the limit, word-level beyond", () => {
+    const opts = {
+      maxDiffDistance: 30,
+      maxChangeRatio: 0.45,
+      mergeModifiedLines: true,
+      inlineMaxCharEdits: 4,
+    };
+
+    // "baz" → "bar": 2 edits ≤ limit → char-level inline diff.
+    const withinLimit = mergeModifiedLines(
+      [
+        { type: "delete", lineNumber: 1, content: "foo bar baz" },
+        { type: "insert", lineNumber: 1, content: "foo bar bar" },
+      ] as any[],
+      opts
+    );
+    expect(withinLimit).toHaveLength(1);
+    expect(withinLimit[0].type).toBe("normal");
+    const withinTypes = withinLimit[0].content.map((s) => s.type);
+    expect(withinTypes).toContain("delete");
+    expect(withinTypes).toContain("insert");
+
+    // "baz" → "ZZZZZZ": 3+6 = 9 edits > limit → word-level segments.
+    const beyondLimit = mergeModifiedLines(
+      [
+        { type: "delete", lineNumber: 1, content: "foo bar baz qux" },
+        { type: "insert", lineNumber: 1, content: "foo bar ZZZZZZ qux" },
+      ] as any[],
+      opts
+    );
+    expect(beyondLimit).toHaveLength(1);
+    expect(beyondLimit[0].type).toBe("normal");
+    const segments = beyondLimit[0].content;
+    expect(segments.some((s) => s.type === "delete" && s.value === "baz")).toBe(
+      true
+    );
+    expect(
+      segments.some((s) => s.type === "insert" && s.value === "ZZZZZZ")
+    ).toBe(true);
   });
 
   test("crossing content-identical pairs prevented when not a complete permutation", () => {
