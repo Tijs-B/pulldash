@@ -3769,6 +3769,25 @@ export class PRReviewStore {
         this.invalidatePRCaches(owner, repo, pr.number);
 
         this.set({ prInMergeQueue: true, merging: false });
+      } else if (pr.stack) {
+        // Stacked PRs must be merged via the asynchronous merge endpoint.
+        const result = await this.github.mergePRAsync(owner, repo, pr.number, {
+          merge_method: mergeMethod,
+          sha: pr.head.sha,
+        });
+
+        this.invalidatePRCaches(owner, repo, pr.number);
+
+        if (result.status === "merged") {
+          this.set({
+            pr: { ...this.state.pr, merged: true, state: "closed" as const },
+            merging: false,
+          });
+        } else if (result.status === "enqueued") {
+          this.set({ prInMergeQueue: true, merging: false });
+        } else {
+          throw new Error(result.details?.message ?? "Failed to merge");
+        }
       } else {
         await this.github.mergePR(owner, repo, pr.number, {
           merge_method: mergeMethod,

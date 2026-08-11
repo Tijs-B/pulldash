@@ -42,6 +42,10 @@ function createMockGitHubStore(): GitHubStore {
     invalidatePR: () => {},
     getPR: async () => createMockPR(),
     mergePR: async () => ({ merged: true }),
+    mergePRAsync: async () => ({
+      status: "merged",
+      details: { message: "merged" },
+    }),
     closePR: async () => {},
     reopenPR: async () => {},
     deleteBranch: async () => {},
@@ -763,6 +767,10 @@ function createMockGitHubStoreWithVersions(
     invalidatePR: () => {},
     getPR: async () => createMockPR(),
     mergePR: async () => ({ merged: true }),
+    mergePRAsync: async () => ({
+      status: "merged",
+      details: { message: "merged" },
+    }),
     closePR: async () => {},
     reopenPR: async () => {},
     deleteBranch: async () => {},
@@ -985,6 +993,108 @@ test("mergePR sets mergeError and clears merging on failure", async () => {
   expect(state.merging).toBe(false);
   expect(state.mergeError).toBe("Merge conflict");
   expect(state.pr.merged).toBe(false);
+});
+
+// ============================================================================
+// mergePR (stacked PRs - async merge endpoint)
+// ============================================================================
+
+function createStackedMockPR(): PullRequest {
+  return createMockPR({
+    stack: {
+      id: 1,
+      number: 2,
+      size: 2,
+      position: 1,
+      base: { ref: "main", sha: "def456" },
+    },
+  });
+}
+
+test("mergePR uses async merge endpoint for stacked PRs and sets merged=true", async () => {
+  let syncCalled = false;
+  let asyncCalled = false;
+  const github = {
+    ...createMockGitHubStore(),
+    mergePR: async () => {
+      syncCalled = true;
+      return { merged: true };
+    },
+    mergePRAsync: async () => {
+      asyncCalled = true;
+      return { status: "merged", details: { message: "merged" } };
+    },
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createStackedMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  const result = await store.mergePR();
+
+  expect(result).toBe(true);
+  expect(asyncCalled).toBe(true);
+  expect(syncCalled).toBe(false);
+  const state = store.getSnapshot();
+  expect(state.pr.merged).toBe(true);
+  expect(state.pr.state).toBe("closed");
+  expect(state.merging).toBe(false);
+});
+
+test("mergePR sets prInMergeQueue when async merge is enqueued", async () => {
+  const github = {
+    ...createMockGitHubStore(),
+    mergePRAsync: async () => ({
+      status: "enqueued",
+      details: { message: "enqueued" },
+    }),
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createStackedMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  const result = await store.mergePR();
+
+  expect(result).toBe(true);
+  const state = store.getSnapshot();
+  expect(state.prInMergeQueue).toBe(true);
+  expect(state.pr.merged).toBe(false);
+  expect(state.merging).toBe(false);
+});
+
+test("mergePR sets mergeError when async merge fails", async () => {
+  const github = {
+    ...createMockGitHubStore(),
+    mergePRAsync: async () => {
+      throw new Error("Merge failed");
+    },
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createStackedMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  const result = await store.mergePR();
+
+  expect(result).toBe(false);
+  const state = store.getSnapshot();
+  expect(state.merging).toBe(false);
+  expect(state.mergeError).toBe("Merge failed");
+  expect(state.pr.merged).toBe(false);
+  expect(state.prInMergeQueue).toBe(false);
 });
 
 // ============================================================================

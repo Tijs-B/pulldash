@@ -74,6 +74,19 @@ export type UserProfile = components["schemas"]["public-user"];
 // Types
 // ============================================================================
 
+/**
+ * Result of an asynchronous merge (POST /pulls/{pull_number}/merge-async).
+ * While pending, `details.uuid` can be polled until a terminal status.
+ */
+export interface AsyncMergeResult {
+  status: "pending" | "merged" | "enqueued" | "failed";
+  details: {
+    message: string;
+    uuid?: string;
+    sha?: string;
+  };
+}
+
 export interface PRSearchResult {
   id: number;
   number: number;
@@ -1118,6 +1131,117 @@ function createGitHubStore() {
 
     invalidatePR(owner, repo, number);
     return data;
+  }
+
+  /**
+   * Merge a PR asynchronously (required for stacked PRs). Submits the merge
+   * request and polls the returned UUID until the merge reaches a terminal
+   * state. Throws if the merge fails or times out.
+   */
+  async function mergePRAsync(
+    owner: string,
+    repo: string,
+    number: number,
+    options?: {
+      merge_method?: "merge" | "squash" | "rebase";
+      sha?: string;
+    }
+  ): Promise<AsyncMergeResult> {
+    if (!octokit) throw new Error("Not initialized");
+
+    let result: AsyncMergeResult;
+    try {
+      const { data } = await octokit.request<AsyncMergeResult>({
+        method: "PUT",
+        url: "/repos/{owner}/{repo}/pulls/{pull_number}/merge-async",
+        owner,
+        repo,
+        pull_number: number,
+        merge_method: options?.merge_method ?? "squash",
+        merge_action: "direct_merge",
+        sha: options?.sha,
+      });
+      result = data;
+    } catch (error) {
+      // 409: an async merge is already in flight for this PR — the response
+      // carries that request's UUID, which we can poll instead.
+      const err = error as {
+        status?: number;
+        response?: { data?: AsyncMergeResult };
+      };
+      if (err.status === 409 && err.response?.data) {
+        result = err.response.data;
+      } else {
+        throw error;
+      }
+    }
+
+    const { uuid } = result.details ?? {};
+    if (!uuid) return result; // already terminal (merged/enqueued/failed)
+
+    // The merge runs as a background job on GitHub (stacked merges can take
+    // several minutes), so poll patiently instead of giving up quickly.
+    const startedAt = Date.now();
+    const MAX_POLL_MS = 15 * 60_000;
+    let intervalMs = 2000;
+    let attempt = 0;
+    while (
+      result.status === "pending" &&
+      Date.now() - startedAt < MAX_POLL_MS
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      if (Date.now() - startedAt > 2 * 60_000) {
+        intervalMs = Math.min(intervalMs + 2000, 10_000);
+      }
+      attempt++;
+
+      try {
+        const { data } = await octokit.request<AsyncMergeResult>({
+          method: "GET",
+          url: "/repos/{owner}/{repo}/pulls/{pull_number}/merge-async/{uuid}",
+          owner,
+          repo,
+          pull_number: number,
+          uuid,
+        });
+        result = data;
+        if (result.status !== "pending") break;
+      } catch {
+        // Transient error — keep polling; the PR-state check below still runs.
+      }
+
+      // Accelerator: if the PR itself has flipped to merged, we're done even
+      // if the UUID endpoint misbehaves.
+      if (attempt % 5 === 0) {
+        try {
+          const pr = await queryClient.fetchQuery({
+            ...queries.pullRequest(owner, repo, number),
+            staleTime: 0,
+          });
+          if (pr.merged) {
+            return {
+              status: "merged",
+              details: {
+                message: "Merged",
+                sha: pr.merge_commit_sha ?? undefined,
+              },
+            };
+          }
+        } catch {
+          // Ignore — rely on UUID polling
+        }
+      }
+    }
+
+    if (result.status === "pending") {
+      throw new Error(
+        "Merge is still running in the background on GitHub. It will complete there and the PR status will update."
+      );
+    }
+    if (result.status === "failed") {
+      throw new Error(result.details?.message ?? "Failed to merge");
+    }
+    return result;
   }
 
   async function dequeuePullRequest(
@@ -2462,6 +2586,7 @@ function createGitHubStore() {
     getWorkflowRuns: getWorkflowRunsForSha,
     approveWorkflowRun,
     mergePR,
+    mergePRAsync,
     dequeuePullRequest,
     enqueuePullRequest,
     getPRCommits,

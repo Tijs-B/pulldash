@@ -4,6 +4,14 @@ import { components } from "@octokit/openapi-types";
 // Extended types include body_html from GitHub's HTML media type (application/vnd.github.html+json)
 export type PullRequest = components["schemas"]["pull-request"] & {
   body_html?: string;
+  // Stacked PRs (newer than openapi-types@27; null for non-stacked PRs)
+  stack?: {
+    id: number;
+    number: number;
+    size: number;
+    position: number;
+    base: { ref: string; sha: string };
+  } | null;
 };
 export type PullRequestFile = components["schemas"]["diff-entry"];
 export type ReviewComment =
