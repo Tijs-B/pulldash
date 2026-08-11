@@ -27,7 +27,39 @@ function openDB(): Promise<IDBDatabase> {
       }
     };
 
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const db = req.result;
+      if (db.objectStoreNames.contains(STORE_NAME)) {
+        resolve(db);
+        return;
+      }
+      // Self-heal: a DB created before the "responses" store existed (e.g. by
+      // a crash during upgrade) has no usable store, and `transaction(...)`
+      // would throw. Delete it and reopen so a fresh store is created.
+      console.warn(
+        `[persistent-cache] IndexedDB "${DB_NAME}" is missing store "${STORE_NAME}"; recreating it`
+      );
+      db.close();
+      const del = indexedDB.deleteDatabase(DB_NAME);
+      del.onsuccess = () => {
+        dbPromise = null;
+        resolve(openDB());
+      };
+      del.onerror = () => {
+        dbPromise = null;
+        reject(del.error);
+      };
+      del.onblocked = () => {
+        dbPromise = null;
+        reject(
+          del.error ??
+            new Error(
+              `IndexedDB: could not delete "${DB_NAME}" (blocked by another connection)`
+            )
+        );
+      };
+    };
+
     req.onerror = () => {
       dbPromise = null;
       reject(req.error);

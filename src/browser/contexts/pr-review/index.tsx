@@ -32,6 +32,7 @@ import {
   type TimelineEvent,
   type ReviewThread,
   type PushVersion,
+  type PullRequestStackData,
   groupCommitsIntoVersions,
 } from "@/browser/contexts/github";
 import { diffService } from "@/browser/lib/diff";
@@ -157,7 +158,7 @@ export interface WorkflowRunAwaitingApproval {
 // Merge method type
 export type MergeMethod = "merge" | "squash" | "rebase";
 
-export type OverviewTab = "conversation" | "commits" | "checks";
+export type OverviewTab = "conversation" | "commits" | "checks" | "stack";
 
 interface PRReviewState {
   // Core data
@@ -232,6 +233,10 @@ interface PRReviewState {
   overviewLoading: boolean;
   /** Whether deferred version/push data has been loaded */
   versionDataLoaded: boolean;
+
+  // Stacked PRs (lazily loaded when the Stack tab is first opened)
+  stackData: PullRequestStackData | null;
+  stackLoading: boolean;
 
   // Repository merge settings
   repoAllowMergeCommit: boolean;
@@ -647,6 +652,10 @@ export class PRReviewStore {
       repoAllowRebaseMerge: true,
       repoHasMergeQueue: false,
       prInMergeQueue: false,
+
+      // Stacked PRs (lazily loaded)
+      stackData: null,
+      stackLoading: false,
 
       // Merge state
       merging: false,
@@ -3671,6 +3680,20 @@ export class PRReviewStore {
       });
     } catch {
       // Silently fail — version selectors will show limited info
+    }
+  };
+
+  /** Load the PR stack (lazily, when the Stack tab is first opened). */
+  loadStackData = async (): Promise<void> => {
+    const { owner, repo, pr, stackData, stackLoading } = this.state;
+    if (stackData || stackLoading || !pr.stack) return;
+
+    this.set({ stackLoading: true });
+    try {
+      const data = await this.github.getPRStack(owner, repo, pr.number);
+      this.set({ stackData: data, stackLoading: false });
+    } catch {
+      this.set({ stackLoading: false });
     }
   };
 

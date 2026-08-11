@@ -2,8 +2,28 @@ import { test, expect, beforeEach } from "bun:test";
 import "fake-indexeddb/auto";
 import { get, put, deleteByPRKey, clear } from "./persistent-cache";
 
+// Simulate the broken pre-existing DB state seen in production: "pulldash"
+// exists at version 1 but has no "responses" object store (e.g. a crash
+// during the initial upgrade). Module evaluation runs before any openDB
+// call, so the first operation below must self-heal this state.
+await new Promise<void>((resolve, reject) => {
+  const req = indexedDB.open("pulldash", 1);
+  req.onsuccess = () => {
+    req.result.close();
+    resolve();
+  };
+  req.onerror = () => reject(req.error);
+});
+
 beforeEach(async () => {
   await clear();
+});
+
+test("openDB self-heals a DB missing the responses store", async () => {
+  // Must not throw "responses is not a known object store name"
+  expect(await get<string>("heal-test-key")).toBeNull();
+  await put("heal-test-key", "value", "owner/repo/1");
+  expect(await get<string>("heal-test-key")).toBe("value");
 });
 
 test("put then get returns the stored value", async () => {

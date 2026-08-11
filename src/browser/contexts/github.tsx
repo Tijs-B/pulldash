@@ -150,6 +150,26 @@ export interface PushVersion {
   beforeSha?: string;
 }
 
+// GraphQL-only types for GitHub's stacked PRs feature
+export interface PullRequestStackEntry {
+  position: number;
+  pullRequest: {
+    number: number;
+    title: string;
+    state: string;
+    merged: boolean;
+    isDraft: boolean;
+  };
+}
+
+export interface PullRequestStackData {
+  id: string;
+  number: number;
+  size: number;
+  baseRefName: string;
+  entries: PullRequestStackEntry[];
+}
+
 export function groupCommitsIntoVersions(
   commits: PRCommit[],
   maxGapMinutes = 2
@@ -706,6 +726,17 @@ function createGitHubStore() {
   ): Promise<PullRequest> {
     if (!octokit) throw new Error("Not initialized");
     return queryClient.fetchQuery(queries.pullRequest(owner, repo, number));
+  }
+
+  function getPRStack(
+    owner: string,
+    repo: string,
+    number: number
+  ): Promise<PullRequestStackData | null> {
+    if (!octokit) throw new Error("Not initialized");
+    return queryClient.fetchQuery(
+      queries.pullRequestStack(owner, repo, number)
+    );
   }
 
   function getPRFiles(
@@ -2568,6 +2599,7 @@ function createGitHubStore() {
     searchRepos,
     searchUsers,
     getPR,
+    getPRStack,
     getPRFiles,
     getPRFilesForRange,
     getCommitFiles,

@@ -41,6 +41,7 @@ function createMockGitHubStore(): GitHubStore {
     }),
     invalidatePR: () => {},
     getPR: async () => createMockPR(),
+    getPRStack: async () => null,
     mergePR: async () => ({ merged: true }),
     mergePRAsync: async () => ({
       status: "merged",
@@ -766,6 +767,7 @@ function createMockGitHubStoreWithVersions(
     }),
     invalidatePR: () => {},
     getPR: async () => createMockPR(),
+    getPRStack: async () => null,
     mergePR: async () => ({ merged: true }),
     mergePRAsync: async () => ({
       status: "merged",
@@ -1095,6 +1097,95 @@ test("mergePR sets mergeError when async merge fails", async () => {
   expect(state.mergeError).toBe("Merge failed");
   expect(state.pr.merged).toBe(false);
   expect(state.prInMergeQueue).toBe(false);
+});
+
+// ============================================================================
+// loadStackData
+// ============================================================================
+
+test("loadStackData fetches and stores the stack for stacked PRs", async () => {
+  const stackData = {
+    id: "PRS_1",
+    number: 3,
+    size: 2,
+    baseRefName: "master",
+    entries: [
+      {
+        position: 1,
+        pullRequest: {
+          number: 1,
+          title: "PR 1",
+          state: "OPEN",
+          merged: false,
+          isDraft: false,
+        },
+      },
+      {
+        position: 2,
+        pullRequest: {
+          number: 2,
+          title: "PR 2",
+          state: "OPEN",
+          merged: false,
+          isDraft: false,
+        },
+      },
+    ],
+  };
+  const github = {
+    ...createMockGitHubStore(),
+    getPRStack: async () => stackData,
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createStackedMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  await store.loadStackData();
+
+  const state = store.getSnapshot();
+  expect(state.stackData).toEqual(stackData);
+  expect(state.stackLoading).toBe(false);
+});
+
+test("loadStackData skips fetching when PR is not in a stack", async () => {
+  let fetchCalled = false;
+  const github = {
+    ...createMockGitHubStore(),
+    getPRStack: async () => {
+      fetchCalled = true;
+      return null;
+    },
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  await store.loadStackData();
+
+  expect(fetchCalled).toBe(false);
+  const state = store.getSnapshot();
+  expect(state.stackData).toBeNull();
+  expect(state.stackLoading).toBe(false);
+});
+
+test("setOverviewActiveTab switches to the stack tab", () => {
+  const store = createStore();
+
+  store.setOverviewActiveTab("stack");
+
+  const state = store.getSnapshot();
+  expect(state.overviewActiveTab).toBe("stack");
+  expect(state.showOverview).toBe(true);
 });
 
 // ============================================================================

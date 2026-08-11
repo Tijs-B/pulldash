@@ -34,6 +34,7 @@ import type {
   PRSearchResult,
   PullRequest,
   PullRequestFile,
+  PullRequestStackData,
   PushVersion,
   Review,
   ReviewComment,
@@ -346,6 +347,80 @@ export const queries = {
         }
 
         return versions;
+      },
+      staleTime: 30_000,
+    }),
+
+  pullRequestStack: (owner: string, repo: string, number: number) =>
+    queryOptions({
+      queryKey: ["pull-request", owner, repo, number, "stack"],
+      queryFn: async ({ signal }) => {
+        interface StackEntryNode {
+          position: number;
+          pullRequest: {
+            number: number;
+            title: string;
+            state: string;
+            merged: boolean;
+            isDraft: boolean;
+          };
+        }
+        const data = await getOctokit().graphql<{
+          repository: {
+            pullRequest: {
+              stack: {
+                id: string;
+                number: number;
+                size: number;
+                baseRefName: string;
+                entries: { edges: Array<{ node: StackEntryNode }> };
+              } | null;
+            };
+          };
+        }>(
+          `query GetPullRequestStack($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+              pullRequest(number: $number) {
+                stack {
+                  id
+                  number
+                  size
+                  baseRefName
+                  entries(first: 100) {
+                    edges {
+                      node {
+                        position
+                        pullRequest {
+                          number
+                          title
+                          state
+                          merged
+                          isDraft
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }`,
+          { owner, repo, number, request: { signal } }
+        );
+
+        const stack = data.repository.pullRequest.stack;
+        if (!stack) return null;
+
+        const entries = (stack.entries.edges ?? [])
+          .map(({ node }) => node)
+          .sort((a, b) => a.position - b.position);
+
+        return {
+          id: stack.id,
+          number: stack.number,
+          size: stack.size,
+          baseRefName: stack.baseRefName,
+          entries,
+        } satisfies PullRequestStackData;
       },
       staleTime: 30_000,
     }),

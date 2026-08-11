@@ -62,6 +62,7 @@ import { parseDiffCached, type ParsedDiff } from "../lib/diff";
 import type { ReviewComment } from "@/api/types";
 import { useQuery } from "@tanstack/react-query";
 import { queries } from "../lib/queries";
+import { useOpenPRReviewTab } from "../contexts/tabs";
 import {
   useGitHub,
   useGitHubReady,
@@ -76,6 +77,7 @@ import {
   type TimelineEvent,
   type ReviewThread,
   type PullRequest,
+  type PullRequestStackData,
   type PushVersion,
 } from "../contexts/github";
 import { useCanWrite } from "../contexts/auth";
@@ -1367,6 +1369,15 @@ export const PROverview = memo(function PROverview() {
               label="Files Changed"
               count={files.length}
             />
+            {pr.stack && (
+              <TabButton
+                active={activeTab === "stack"}
+                onClick={() => setActiveTab("stack")}
+                icon={<GitBranch className="w-4 h-4" />}
+                label="Stack"
+                count={pr.stack.size}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -2218,6 +2229,8 @@ export const PROverview = memo(function PROverview() {
                 refreshing={refreshingChecks}
               />
             )}
+
+            {activeTab === "stack" && <StackTab />}
           </div>
 
           {/* Right Column - Sidebar */}
@@ -4746,6 +4759,119 @@ function CommitsTab({
           </BlockLink.Root>
         );
       })}
+    </div>
+  );
+}
+
+// ============================================================================
+// Stack Tab Component
+// ============================================================================
+
+function StackTab() {
+  const store = usePRReviewStore();
+  const pr = usePRReviewSelector((s) => s.pr);
+  const owner = usePRReviewSelector((s) => s.owner);
+  const repo = usePRReviewSelector((s) => s.repo);
+  const stackData = usePRReviewSelector((s) => s.stackData);
+  const stackLoading = usePRReviewSelector((s) => s.stackLoading);
+  const openPRReviewTab = useOpenPRReviewTab();
+
+  // Lazy-load the stack the first time the tab is opened
+  useEffect(() => {
+    store.loadStackData();
+  }, [store]);
+
+  if (stackLoading && !stackData) {
+    return (
+      <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        Loading stack...
+      </div>
+    );
+  }
+
+  if (!stackData) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        This pull request is not part of a stack.
+      </p>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <GitBranch className="w-4 h-4" />
+        <span>
+          {stackData.size} PRs stacked on{" "}
+          <span className="font-mono text-foreground">
+            {stackData.baseRefName}
+          </span>
+        </span>
+      </div>
+      <div className="border border-border rounded-md overflow-hidden divide-y divide-border">
+        {stackData.entries.map((entry) => {
+          const { pullRequest } = entry;
+          const isCurrent = pullRequest.number === pr.number;
+          return (
+            <button
+              key={pullRequest.number}
+              onClick={() =>
+                openPRReviewTab(
+                  owner,
+                  repo,
+                  pullRequest.number,
+                  pullRequest.title
+                )
+              }
+              className={cn(
+                "flex items-center gap-3 p-3 w-full text-left",
+                isCurrent
+                  ? "bg-muted/50 cursor-default"
+                  : "hover:bg-card/30 cursor-pointer"
+              )}
+            >
+              <span
+                className={cn(
+                  "flex items-center justify-center w-6 h-6 rounded text-xs font-semibold shrink-0",
+                  isCurrent
+                    ? "bg-orange-500/15 text-orange-500"
+                    : "bg-muted text-muted-foreground"
+                )}
+              >
+                {entry.position}
+              </span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <span className="text-sm font-medium truncate">
+                    {pullRequest.title}
+                  </span>
+                  <span className="text-xs text-muted-foreground shrink-0">
+                    #{pullRequest.number}
+                  </span>
+                  {pullRequest.isDraft && (
+                    <span className="text-xs text-muted-foreground border border-border rounded px-1 py-0.5 shrink-0">
+                      Draft
+                    </span>
+                  )}
+                </div>
+              </div>
+              {isCurrent && (
+                <span className="text-xs text-orange-500 shrink-0">
+                  current
+                </span>
+              )}
+              {pullRequest.merged ? (
+                <CheckCircle2 className="w-4 h-4 text-purple-500 shrink-0" />
+              ) : pullRequest.state === "CLOSED" ? (
+                <XCircle className="w-4 h-4 text-red-500 shrink-0" />
+              ) : (
+                <GitPullRequest className="w-4 h-4 text-green-500 shrink-0" />
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
