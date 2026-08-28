@@ -50,6 +50,11 @@ async function build() {
     resolve(process.cwd(), "dist", "browser", "404.html")
   );
 
+  await cp(
+    resolve(process.cwd(), "src", "browser", "CNAME"),
+    resolve(process.cwd(), "dist", "browser", "CNAME")
+  );
+
   // PWA files
   await cp(
     resolve(process.cwd(), "src", "browser", "manifest.json"),
