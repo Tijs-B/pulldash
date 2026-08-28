@@ -87,6 +87,11 @@ interface PatchLineEntry {
   // delete : only oldLineNumber
   oldLineNumber?: number;
   newLineNumber?: number;
+  // Index of the unified-diff hunk this line came from within its patch.
+  // Two consecutive entries with different hunkIndex are separated by a
+  // real, unshown stretch of the file — a hard boundary that hunk-merging
+  // must never smear across.
+  hunkIndex: number;
 }
 
 /**
@@ -102,7 +107,7 @@ function buildPatchEntries(patch: string): PatchLineEntry[] {
     const files = gitDiffParser.parse(diffContent);
     if (!files[0]) return entries;
 
-    for (const hunk of files[0].hunks) {
+    files[0].hunks.forEach((hunk, hunkIndex) => {
       for (const change of hunk.changes) {
         if (change.type === "normal") {
           entries.push({
@@ -110,22 +115,25 @@ function buildPatchEntries(patch: string): PatchLineEntry[] {
             kind: "context",
             oldLineNumber: change.oldLineNumber,
             newLineNumber: change.newLineNumber,
+            hunkIndex,
           });
         } else if (change.type === "insert") {
           entries.push({
             content: change.content,
             kind: "insert",
             newLineNumber: change.lineNumber,
+            hunkIndex,
           });
         } else if (change.type === "delete") {
           entries.push({
             content: change.content,
             kind: "delete",
             oldLineNumber: change.lineNumber,
+            hunkIndex,
           });
         }
       }
-    }
+    });
   } catch {
     // ignore parse errors
   }
@@ -191,7 +199,56 @@ export function computeInterdiff(
   let nextOld = 0;
   let nextNew = 0;
 
+  // Track, per flat entry, whether building it crossed a real hunk boundary
+  // in either source patch (i.e. a genuine unshown stretch of the file lies
+  // immediately before it). Hunk-merging must never smear across these.
+  const boundaries: boolean[] = [];
+  let lastHunkA: number | null = null;
+  let lastHunkB: number | null = null;
+  let pendingBoundary = false;
+
+  // Track each patch's most recent (own-post-image - base) line offset, from
+  // the last context line seen (context lines carry both a base-relative
+  // and post-image line number, giving an exact correspondence). Used to
+  // convert the *other* patch's base-relative number into an estimate of
+  // this patch's post-image number when synthesizing across a region only
+  // one patch's window covers — far more accurate after a hard boundary
+  // than blindly continuing the pre-gap running counter. Defaults to 0
+  // (base-relative == post-image-relative) since any file region before a
+  // patch's first hunk — or a patch with no hunks at all — is unchanged.
+  let offsetA = 0;
+  let offsetB = 0;
+
+  const takeA = (): PatchLineEntry => {
+    const e = entriesA[idxA++];
+    if (lastHunkA !== null && e.hunkIndex !== lastHunkA) pendingBoundary = true;
+    lastHunkA = e.hunkIndex;
+    if (
+      e.kind === "context" &&
+      e.oldLineNumber != null &&
+      e.newLineNumber != null
+    ) {
+      offsetA = e.newLineNumber - e.oldLineNumber;
+    }
+    return e;
+  };
+  const takeB = (): PatchLineEntry => {
+    const e = entriesB[idxB++];
+    if (lastHunkB !== null && e.hunkIndex !== lastHunkB) pendingBoundary = true;
+    lastHunkB = e.hunkIndex;
+    if (
+      e.kind === "context" &&
+      e.oldLineNumber != null &&
+      e.newLineNumber != null
+    ) {
+      offsetB = e.newLineNumber - e.oldLineNumber;
+    }
+    return e;
+  };
+
   const pushFlat = (line: FlatLine) => {
+    boundaries.push(pendingBoundary);
+    pendingBoundary = false;
     flat.push(line);
     if (line.oldLineNumber != null) nextOld = line.oldLineNumber + 1;
     if (line.newLineNumber != null) nextNew = line.newLineNumber + 1;
@@ -201,8 +258,8 @@ export function computeInterdiff(
     if (!chunk.added && !chunk.removed) {
       // LCS equal: same content in both sequences.  Disambiguate by kind.
       for (const content of chunk.value) {
-        const ea = entriesA[idxA++];
-        const eb = entriesB[idxB++];
+        const ea = takeA();
+        const eb = takeB();
         if (ea.kind === "insert" && eb.kind === "delete") {
           // v1 added it; v2 removed it.  Net: line is gone in v2.
           pushFlat({
@@ -257,7 +314,7 @@ export function computeInterdiff(
     } else if (chunk.removed) {
       // Present in v1's patch sequence but not v2's.
       for (const content of chunk.value) {
-        const ea = entriesA[idxA++];
+        const ea = takeA();
         if (ea.kind === "insert") {
           // v1 deliberately added this line; v2 doesn't have it → delete.
           pushFlat({
@@ -275,12 +332,15 @@ export function computeInterdiff(
           });
         } else {
           // kind="context": line is in v1's patch window but not v2's.
-          // Treat as equal (both versions have it, but v2 just doesn't include
-          // it in its patch window). Old-side gets v1's real number; new-side
-          // is synthesized from the running counter so it stays consistent
-          // with surrounding paired equals.
+          // Old-side gets v1's real number. New-side is estimated from v1's
+          // base-relative number plus v2's most recently known base→head
+          // offset (falls back to the running counter if v2 has no anchor
+          // yet at all).
           const oldLineNumber = ea.newLineNumber;
-          const newLineNumber = nextNew || oldLineNumber;
+          const newLineNumber =
+            ea.oldLineNumber != null
+              ? ea.oldLineNumber + offsetB
+              : nextNew || oldLineNumber;
           pushFlat({
             type: "equal",
             content,
@@ -292,7 +352,7 @@ export function computeInterdiff(
     } else {
       // Present in v2's patch sequence but not v1's.
       for (const content of chunk.value) {
-        const eb = entriesB[idxB++];
+        const eb = takeB();
         if (eb.kind === "insert") {
           // v2 deliberately added this line; v1 doesn't have it → insert.
           pushFlat({
@@ -310,9 +370,14 @@ export function computeInterdiff(
           });
         } else {
           // kind="context": mirror of the A-only branch. New-side gets v2's
-          // real number; old-side is synthesized from the running counter.
+          // real number. Old-side is estimated from v2's base-relative
+          // number plus v1's most recently known base→prev offset (falls
+          // back to the running counter if v1 has no anchor yet at all).
           const newLineNumber = eb.newLineNumber;
-          const oldLineNumber = nextOld || newLineNumber;
+          const oldLineNumber =
+            eb.oldLineNumber != null
+              ? eb.oldLineNumber + offsetA
+              : nextOld || newLineNumber;
           pushFlat({
             type: "equal",
             content,
@@ -329,15 +394,43 @@ export function computeInterdiff(
 
   if (changedIdxs.length === 0) return { hunks: [] };
 
-  // Merge changed indices into hunk ranges (±CONTEXT_LINES context each side)
+  // Merge changed indices into hunk ranges (±CONTEXT_LINES context each side).
+  //
+  // `flat` only contains lines either patch's context window touched — a
+  // long untouched stretch of the real file (e.g. when one patch is empty,
+  // or a change is far from anything the other patch shows) is simply
+  // absent from `flat`, so consecutive entries can be adjacent in the array
+  // while being hundreds of lines apart in the real file. Growing a context
+  // window by raw index count (or merging ranges by raw index adjacency)
+  // would smear across that hidden gap: it would borrow a line number from
+  // the wrong side of the gap and/or swallow a skip block that must exist.
+  // `isHardBoundary` uses the hunk-crossing flags recorded while building
+  // `flat`; window growth and range merging both stop at them.
+  const isHardBoundary = (i: number): boolean => {
+    if (i <= 0 || i >= flat.length) return true;
+    return boundaries[i];
+  };
+  const windowFor = (idx: number): [number, number] => {
+    let lo = idx;
+    while (lo > 0 && idx - lo < CONTEXT_LINES && !isHardBoundary(lo)) lo--;
+    let hi = idx;
+    while (
+      hi < flat.length - 1 &&
+      hi - idx < CONTEXT_LINES &&
+      !isHardBoundary(hi + 1)
+    )
+      hi++;
+    return [lo, hi];
+  };
+
   const ranges: [number, number][] = [];
-  let rangeStart = Math.max(0, changedIdxs[0] - CONTEXT_LINES);
-  let rangeEnd = Math.min(flat.length - 1, changedIdxs[0] + CONTEXT_LINES);
+  let [rangeStart, rangeEnd] = windowFor(changedIdxs[0]);
 
   for (let i = 1; i < changedIdxs.length; i++) {
-    const nextStart = Math.max(0, changedIdxs[i] - CONTEXT_LINES);
-    const nextEnd = Math.min(flat.length - 1, changedIdxs[i] + CONTEXT_LINES);
-    if (nextStart <= rangeEnd + 1) {
+    const [nextStart, nextEnd] = windowFor(changedIdxs[i]);
+    const touchesWithoutGap =
+      nextStart <= rangeEnd || !isHardBoundary(nextStart);
+    if (nextStart <= rangeEnd + 1 && touchesWithoutGap) {
       rangeEnd = Math.max(rangeEnd, nextEnd);
     } else {
       ranges.push([rangeStart, rangeEnd]);
@@ -358,19 +451,27 @@ export function computeInterdiff(
   for (const [start, end] of ranges) {
     const hunkBlock = flat.slice(start, end + 1);
 
-    // Determine this hunk's first and last post-image line numbers. Hunks
-    // include CONTEXT_LINES of equal context on each side, so newLineNumber is
-    // almost always populated on the edge entries; fall back defensively.
+    // Determine this hunk's first/last post-image (new) and pre-image (old)
+    // line numbers. Hunks include CONTEXT_LINES of equal context on each
+    // side, so both are almost always populated on the edge entries; fall
+    // back defensively. Scanning the whole block (not just the first entry)
+    // matters because the very first entry can be a pure insert/delete with
+    // only one side populated.
     let firstNewLine: number | undefined;
     let lastNewLine: number | undefined;
+    let firstOldLine: number | undefined;
     for (const fl of hunkBlock) {
       if (fl.newLineNumber != null) {
         if (firstNewLine === undefined) firstNewLine = fl.newLineNumber;
         lastNewLine = fl.newLineNumber;
       }
+      if (fl.oldLineNumber != null) {
+        if (firstOldLine === undefined) firstOldLine = fl.oldLineNumber;
+      }
     }
-    const hunkStart = firstNewLine ?? flat[start].oldLineNumber ?? nextFileLine;
+    const hunkStart = firstNewLine ?? firstOldLine ?? nextFileLine;
     const hunkEnd = lastNewLine ?? hunkStart;
+    const hunkOldStart = firstOldLine ?? hunkStart;
 
     if (hunkStart > nextFileLine) {
       output.push({
@@ -417,7 +518,7 @@ export function computeInterdiff(
 
     output.push({
       type: "hunk",
-      oldStart: flat[start].oldLineNumber ?? hunkStart,
+      oldStart: hunkOldStart,
       newStart: hunkStart,
       lines: hunkLines,
     });
