@@ -145,14 +145,14 @@ export function useKeyboardNavigation() {
           e.preventDefault();
           // Use startTransition to allow React to interrupt rendering during rapid navigation
           startTransition(() => {
-            store.navigateToPrevUnviewedFile();
+            store.navigateToNextUnviewedFile();
           });
           break;
         case "k":
           e.preventDefault();
           // Use startTransition to allow React to interrupt rendering during rapid navigation
           startTransition(() => {
-            store.navigateToNextUnviewedFile();
+            store.navigateToPrevUnviewedFile();
           });
           break;
         case "[":
