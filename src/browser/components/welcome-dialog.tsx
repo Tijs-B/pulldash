@@ -532,7 +532,7 @@ function FileNavigationAnimation({ isActive }: { isActive: boolean }) {
 
     const sequence = [
       // Navigate and mark viewed
-      { delay: 500, action: () => setShowKeyHint("k") },
+      { delay: 500, action: () => setShowKeyHint("j") },
       {
         delay: 700,
         action: () => {
@@ -555,7 +555,7 @@ function FileNavigationAnimation({ isActive }: { isActive: boolean }) {
           setViewedFiles(new Set([1]));
         },
       },
-      { delay: 1800, action: () => setShowKeyHint("k") },
+      { delay: 1800, action: () => setShowKeyHint("j") },
       {
         delay: 2000,
         action: () => {
@@ -578,7 +578,7 @@ function FileNavigationAnimation({ isActive }: { isActive: boolean }) {
           setViewedFiles(new Set([1, 2]));
         },
       },
-      { delay: 3100, action: () => setShowKeyHint("k") },
+      { delay: 3100, action: () => setShowKeyHint("j") },
       {
         delay: 3300,
         action: () => {

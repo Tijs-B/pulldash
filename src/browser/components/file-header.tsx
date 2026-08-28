@@ -124,11 +124,11 @@ export const FileHeader = memo(function FileHeader({
             <button
               onClick={onPrevFile}
               className="flex items-center gap-0.5 px-1.5 py-0.5 text-xs rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-              title="Previous unreviewed file (j)"
+              title="Previous unreviewed file (k)"
             >
               <ChevronLeft className="w-3.5 h-3.5" />
               <kbd className="hidden sm:inline-block px-1 py-0.5 bg-muted/60 rounded text-[9px] font-mono">
-                j
+                k
               </kbd>
             </button>
             <span className="text-xs text-muted-foreground tabular-nums px-1">
@@ -137,10 +137,10 @@ export const FileHeader = memo(function FileHeader({
             <button
               onClick={onNextFile}
               className="flex items-center gap-0.5 px-1.5 py-0.5 text-xs rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-              title="Next unreviewed file (k)"
+              title="Next unreviewed file (j)"
             >
               <kbd className="hidden sm:inline-block px-1 py-0.5 bg-muted/60 rounded text-[9px] font-mono">
-                k
+                j
               </kbd>
               <ChevronRight className="w-3.5 h-3.5" />
             </button>

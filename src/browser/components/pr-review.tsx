@@ -1569,8 +1569,8 @@ const KeybindsBar = memo(function KeybindsBar() {
                 <Keycap keyName="]" size="xs" /> prev/next commit
               </span>
               <span className="flex items-center gap-1.5 text-muted-foreground">
-                <Keycap keyName="j" size="xs" />
-                <Keycap keyName="k" size="xs" /> prev/next file
+                <Keycap keyName="k" size="xs" />
+                <Keycap keyName="j" size="xs" /> prev/next file
               </span>
               <span className="flex items-center gap-1.5 text-muted-foreground">
                 <Keycap keyName="v" size="xs" /> mark viewed
