@@ -10,6 +10,7 @@ export function useSkipBlockExpansion() {
   const repo = usePRReviewSelector((s) => s.repo);
   const pr = usePRReviewSelector((s) => s.pr);
   const selectedFile = usePRReviewSelector((s) => s.selectedFile);
+  const selectedHeadSha = usePRReviewSelector((s) => s.selectedHeadSha);
   const expandedSkipBlocks = usePRReviewSelector((s) => s.expandedSkipBlocks);
   const expandingSkipBlocks = usePRReviewSelector((s) => s.expandingSkipBlocks);
 
@@ -30,12 +31,16 @@ export function useSkipBlockExpansion() {
       store.setSkipBlockExpanding(key, true);
 
       try {
-        // Fetch the file content from the head commit
+        // Fetch the file content from the version currently being viewed as
+        // "head" (falls back to the PR's actual head when viewing latest) —
+        // must match the sha computeFullBranchInterdiff/computeInterdiff
+        // used, or the fetched content (and its line numbers) won't line up
+        // with the interdiff's hunks.
         const content = await github.getFileContent(
           owner,
           repo,
           selectedFile,
-          pr.head.sha,
+          selectedHeadSha ?? pr.head.sha,
           `${owner}/${repo}/${pr.number}`
         );
 
@@ -77,6 +82,7 @@ export function useSkipBlockExpansion() {
       owner,
       repo,
       pr.head.sha,
+      selectedHeadSha,
       selectedFile,
       expandedSkipBlocks,
       expandingSkipBlocks,

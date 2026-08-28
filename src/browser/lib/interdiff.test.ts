@@ -744,4 +744,59 @@ describe("computeInterdiff", () => {
       )
     ).toBe(false);
   });
+  test("distant unrelated changes stay in separate hunks with a skip block between them", () => {
+    // v1 (compare-to) never touched this file at all — it matches base
+    // exactly. v2 (head) has two changes far apart in the file. Regression
+    // test: previously, because v1's patch contributed nothing to the
+    // aligned sequence, these two far-apart v2 hunks collapsed into flat-array
+    // neighbors and were wrongly merged into one hunk with no skip between.
+    const patch1 = "";
+    const patch2 = [
+      "@@ -1,3 +1,4 @@",
+      "+brand_new_first_line",
+      " line1",
+      " line2",
+      " line3",
+      "@@ -50,3 +51,3 @@",
+      " farline1",
+      "-farline2",
+      "+farline2_changed",
+      " farline3",
+    ].join("\n");
+
+    const result = computeInterdiff(patch1, patch2, "test.txt");
+    const skips = result.hunks.filter(
+      (h) => h.type === "skip"
+    ) as DiffSkipBlock[];
+    const hunks = result.hunks.filter((h) => h.type === "hunk") as DiffHunk[];
+
+    expect(hunks.length).toBe(2);
+    // A real skip block (not just the trailing sentinel) must separate them.
+    expect(skips.some((s) => s.count > 0 && s.count < 1000)).toBe(true);
+
+    // Old-side (v1/compare-to) line numbers for the second hunk must reflect
+    // the real file position (~50), not a phantom small number carried over
+    // from the unrelated first hunk.
+    const secondHunkOldLines = hunks[1].lines
+      .map((l) => l.oldLineNumber)
+      .filter((n): n is number => n != null);
+    expect(Math.min(...secondHunkOldLines)).toBeGreaterThan(40);
+  });
+
+  test("hunk oldStart is not seeded from the new-side number when the first line is a pure insert", () => {
+    const patch1 = "";
+    const patch2 = [
+      "@@ -1,3 +1,4 @@",
+      "+new_first_line",
+      " a",
+      " b",
+      " c",
+    ].join("\n");
+    const result = computeInterdiff(patch1, patch2, "test.txt");
+    const hunk = result.hunks.find((h) => h.type === "hunk") as DiffHunk;
+    expect(hunk).toBeDefined();
+    // oldStart must come from the old-side numbering (line 1), never the
+    // new-side hunkStart used as a wrong-coordinate-space fallback.
+    expect(hunk.oldStart).toBe(1);
+  });
 });
