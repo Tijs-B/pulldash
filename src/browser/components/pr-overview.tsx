@@ -5122,6 +5122,7 @@ interface PRData {
   draft?: boolean;
   state: string;
   mergeable: boolean | null;
+  mergeable_state?: string | null;
 }
 
 function canMerge(
@@ -5131,6 +5132,8 @@ function canMerge(
   if (pr.draft) return false;
   if (pr.state !== "open") return false;
   if (pr.mergeable === false) return false;
+  // Branch protection requirements (required reviews/checks, etc.) not met.
+  if (pr.mergeable_state === "blocked") return false;
   return true;
 }
 
@@ -5141,6 +5144,8 @@ function getMergeStatusText(
   if (pr.draft) return "This pull request is still a draft";
   if (pr.mergeable === false)
     return "This branch has conflicts that must be resolved";
+  if (pr.mergeable_state === "blocked")
+    return "Merging is blocked: branch protection requirements are not met";
   if (checkStatus === "failure") return "Some checks have failed";
   if (checkStatus === "pending") return "Some checks haven't completed yet";
   return "This branch has no conflicts with the base branch";
