@@ -21,7 +21,11 @@ import { hastToHtml } from "../../shared/diff-utils";
 import { cn } from "../cn";
 import { isMac } from "./keycap";
 import { Popover, PopoverContent, PopoverAnchor } from "./popover";
-import { useGitHubStore, useGitHubSelector } from "../contexts/github";
+import {
+  useGitHubStore,
+  useGitHubSelector,
+  type PRTitleInfo,
+} from "../contexts/github";
 import { UserHoverCard } from "./user-hover-card";
 import { useNavigate } from "react-router-dom";
 import {
@@ -29,6 +33,8 @@ import {
   Bold,
   Italic,
   Code,
+  GitMerge,
+  GitPullRequest,
   Link,
   List,
   ListOrdered,
@@ -66,6 +72,89 @@ function rewriteGitHubPRUrl(href: string): string | null {
   if (!match) return null;
   const [, owner, repo, number, rest] = match;
   return `/${owner}/${repo}/pull/${number}${rest || ""}`;
+}
+
+// ============================================================================
+// Issue-link enrichment (PR/issue titles in pre-rendered GitHub HTML)
+// ============================================================================
+
+function parseIssueLinkHref(
+  href: string
+): { owner: string; repo: string; number: number } | null {
+  const match = href.match(
+    /^(?:https?:\/\/github\.com)?\/?([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/(\d+)/
+  );
+  if (!match) return null;
+  return {
+    owner: match[1],
+    repo: match[2],
+    number: parseInt(match[3], 10),
+  };
+}
+
+export function extractIssueLinkRefs(
+  html: string
+): Array<{ owner: string; repo: string; number: number }> {
+  const refs = new Map<
+    string,
+    { owner: string; repo: string; number: number }
+  >();
+  const anchorRe = /<a\s+([^>]*class="[^"]*\bissue-link\b[^"]*"[^>]*)>/g;
+  for (const match of html.matchAll(anchorRe)) {
+    const href = match[1].match(/href="([^"]+)"/)?.[1];
+    if (!href) continue;
+    const ref = parseIssueLinkHref(href);
+    if (ref) refs.set(`${ref.owner}/${ref.repo}#${ref.number}`, ref);
+  }
+  return [...refs.values()];
+}
+
+const ISSUE_LINK_CACHE_TTL = 5 * 60_000;
+const ISSUE_LINK_CACHE_MAX = 500;
+const issueLinkCache = new Map<string, { info: PRTitleInfo; at: number }>();
+
+function useIssueLinkTitles(html: string): Map<string, PRTitleInfo> {
+  const github = useGitHubStore();
+  const [loaded, setLoaded] = useState<Map<string, PRTitleInfo>>(new Map());
+  const refs = useMemo(() => extractIssueLinkRefs(html), [html]);
+
+  useEffect(() => {
+    const cached = new Map<string, PRTitleInfo>();
+    const missing: Array<{ owner: string; repo: string; number: number }> = [];
+    for (const ref of refs) {
+      const key = `${ref.owner}/${ref.repo}#${ref.number}`;
+      const entry = issueLinkCache.get(key);
+      if (entry && Date.now() - entry.at < ISSUE_LINK_CACHE_TTL) {
+        cached.set(key, entry.info);
+      } else {
+        missing.push(ref);
+      }
+    }
+    setLoaded(cached);
+    if (missing.length === 0) return;
+
+    let cancelled = false;
+    github
+      .getPRTitles(missing)
+      .then((result) => {
+        if (cancelled) return;
+        for (const [key, info] of result) {
+          issueLinkCache.set(key, { info, at: Date.now() });
+        }
+        while (issueLinkCache.size > ISSUE_LINK_CACHE_MAX) {
+          const oldest = issueLinkCache.keys().next().value;
+          if (oldest === undefined) break;
+          issueLinkCache.delete(oldest);
+        }
+        setLoaded(new Map([...cached, ...result]));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [github, refs]);
+
+  return loaded;
 }
 
 // ============================================================================
@@ -392,16 +481,18 @@ function parseNode(node: Node, parentTag?: string): HtmlNode | null {
 function HtmlWithMentions({
   html,
   navigate: nav,
+  prTitles,
 }: {
   html: string;
   navigate: (path: string) => void;
+  prTitles?: Map<string, PRTitleInfo>;
 }) {
   const nodes = useMemo(() => parseHtmlToNodes(html), [html]);
   const imagePreview = useImagePreview();
 
   const rendered = useMemo(
-    () => renderNodes(nodes, imagePreview?.openPreview, nav),
-    [nodes, imagePreview, nav]
+    () => renderNodes(nodes, imagePreview?.openPreview, nav, prTitles),
+    [nodes, imagePreview, nav, prTitles]
   );
 
   return <>{rendered}</>;
@@ -410,10 +501,11 @@ function HtmlWithMentions({
 function renderNodes(
   nodes: HtmlNode[],
   openPreview?: (src: string, alt?: string) => void,
-  navigate?: (path: string) => void
+  navigate?: (path: string) => void,
+  prTitles?: Map<string, PRTitleInfo>
 ): React.ReactNode {
   return nodes.map((node, index) =>
-    renderNode(node, index, openPreview, navigate)
+    renderNode(node, index, openPreview, navigate, prTitles)
   );
 }
 
@@ -421,7 +513,8 @@ function renderNode(
   node: HtmlNode,
   key: number,
   openPreview?: (src: string, alt?: string) => void,
-  navigate?: (path: string) => void
+  navigate?: (path: string) => void,
+  prTitles?: Map<string, PRTitleInfo>
 ): React.ReactNode {
   if (node.type === "text") {
     return node.content;
@@ -574,7 +667,8 @@ function renderNode(
             const children = renderNodes(
               highlightedNodes,
               openPreview,
-              navigate
+              navigate,
+              prTitles
             );
             return createElement("code", { key, ...safeAttributes }, children);
           } catch {
@@ -585,7 +679,7 @@ function renderNode(
     }
 
     const children = node.children
-      ? renderNodes(node.children, openPreview, navigate)
+      ? renderNodes(node.children, openPreview, navigate, prTitles)
       : null;
 
     // Rewrite GitHub PR links to navigate within the app
@@ -593,6 +687,38 @@ function renderNode(
       const href = (safeAttributes.href as string) || "";
       const localHref = rewriteGitHubPRUrl(href);
       if (localHref) {
+        // Enrich GitHub issue-link references with title + state icon
+        let displayChildren = children;
+        if (
+          typeof safeAttributes.className === "string" &&
+          safeAttributes.className.includes("issue-link")
+        ) {
+          const ref = parseIssueLinkHref(href);
+          const info = ref
+            ? prTitles?.get(`${ref.owner}/${ref.repo}#${ref.number}`)
+            : undefined;
+          if (info && ref) {
+            const Icon = info.state === "MERGED" ? GitMerge : GitPullRequest;
+            const iconColor =
+              info.state === "MERGED"
+                ? "text-purple-500"
+                : info.state === "OPEN"
+                  ? "text-green-500"
+                  : "text-red-500";
+            displayChildren = (
+              <>
+                <Icon
+                  className={cn(
+                    "w-3.5 h-3.5 inline-block mr-1 align-[-2px]",
+                    iconColor
+                  )}
+                />
+                {info.title}
+                {"\u00a0"}#{ref.number}
+              </>
+            );
+          }
+        }
         const hashOnly = localHref.startsWith(window.location.pathname)
           ? localHref.slice(window.location.pathname.length)
           : null;
@@ -600,7 +726,7 @@ function renderNode(
           return createElement(
             "a",
             { key, ...safeAttributes, href: hashOnly },
-            children
+            displayChildren
           );
         }
         return createElement(
@@ -614,7 +740,7 @@ function renderNode(
               navigate(localHref);
             },
           },
-          children
+          displayChildren
         );
       }
     }
@@ -635,6 +761,7 @@ export const Markdown = memo(function Markdown({
   const containerRef = useRef<HTMLDivElement>(null);
   const [isEmpty, setIsEmpty] = useState(false);
   const navigate = useNavigate();
+  const prTitles = useIssueLinkTitles(html ?? "");
 
   // Check if rendered content is empty after mount
   useEffect(() => {
@@ -653,7 +780,11 @@ export const Markdown = memo(function Markdown({
           ref={containerRef}
           className={cn("markdown-body", className, isEmpty && "hidden")}
         >
-          <HtmlWithMentions html={html} navigate={navigate} />
+          <HtmlWithMentions
+            html={html}
+            navigate={navigate}
+            prTitles={prTitles}
+          />
         </div>
       </ImagePreviewProvider>
     );

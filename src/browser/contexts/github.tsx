@@ -246,6 +246,12 @@ export interface PREnrichment {
   inMergeQueue: boolean;
 }
 
+// Minimal info to enrich `issue-link` anchors in markdown with title/state
+export interface PRTitleInfo {
+  title: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+}
+
 export interface ReviewThread {
   id: string;
   isResolved: boolean;
@@ -2132,6 +2138,70 @@ function createGitHubStore() {
     return enrichmentMap;
   }
 
+  async function getPRTitles(
+    refs: Array<{ owner: string; repo: string; number: number }>
+  ): Promise<Map<string, PRTitleInfo>> {
+    const result = new Map<string, PRTitleInfo>();
+    if (!batcher || refs.length === 0) return result;
+
+    // Owner/repo are interpolated into the query string — restrict the
+    // characters to what repository names can contain.
+    const sanitized = refs
+      .map((r) => ({
+        owner: r.owner.replace(/[^\w.-]/g, ""),
+        repo: r.repo.replace(/[^\w.-]/g, ""),
+        number: r.number,
+      }))
+      .filter((r) => r.owner && r.repo && Number.isFinite(r.number));
+    if (sanitized.length === 0) return result;
+
+    const refQueries = sanitized
+      .map(
+        (ref, idx) => `
+      r${idx}: repository(owner: "${ref.owner}", name: "${ref.repo}") {
+        pullRequest(number: ${ref.number}) { title state }
+        issue(number: ${ref.number}) { title state }
+      }`
+      )
+      .join("\n");
+
+    type RefResult = {
+      pullRequest: { title: string; state: string } | null;
+      issue: { title: string; state: string } | null;
+    } | null;
+
+    let data: Record<string, RefResult>;
+    try {
+      data = await batcher.query<Record<string, RefResult>>(
+        `query { ${refQueries} }`
+      );
+    } catch (e) {
+      // A single invisible repo fails the whole query; GitHub still returns
+      // partial data alongside the errors.
+      const partial = (e as { data?: Record<string, RefResult> })?.data;
+      if (!partial || typeof partial !== "object") return result;
+      data = partial;
+    }
+
+    sanitized.forEach((ref, idx) => {
+      const entry = data[`r${idx}`];
+      const source = entry?.pullRequest ?? entry?.issue;
+      if (source) {
+        result.set(`${ref.owner}/${ref.repo}#${ref.number}`, {
+          title: source.title,
+          state:
+            source.state === "MERGED"
+              ? "MERGED"
+              : source.state === "CLOSED"
+                ? "CLOSED"
+                : "OPEN",
+        });
+      }
+    });
+
+    return result;
+  }
+
   function getReviewThreads(owner: string, repo: string, number: number) {
     return queryClient.fetchQuery(queries.reviewThreads(owner, repo, number));
   }
@@ -2673,6 +2743,7 @@ function createGitHubStore() {
     // GraphQL
     graphql,
     getPREnrichment,
+    getPRTitles,
     getReviewThreads,
     resolveThread,
     unresolveThread,
