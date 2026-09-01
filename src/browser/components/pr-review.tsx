@@ -2494,7 +2494,7 @@ const DiffViewer = memo(function DiffViewer({
         if (state.selectionAnchor === null) {
           store.setSelectionAnchor(state.focusedLine, side);
         }
-        store.setFocusedLine(lineNum, side);
+        store.setFocusedLine(lineNum, side, "mouse");
         const startLine = Math.min(anchor, lineNum);
         const endLine = Math.max(anchor, lineNum);
         if (startLine !== endLine) {
@@ -2510,7 +2510,7 @@ const DiffViewer = memo(function DiffViewer({
       isDraggingRef.current = true;
       dragAnchorRef.current = lineNum;
       dragSideRef.current = side;
-      store.setFocusedLine(lineNum, side);
+      store.setFocusedLine(lineNum, side, "mouse");
       store.setSelectionAnchor(lineNum, side);
       setIsDraggingState(true);
     },
@@ -2667,7 +2667,7 @@ const DiffViewer = memo(function DiffViewer({
       }
 
       if (closestLine !== null) {
-        store.setFocusedLine(closestLine, dragSide);
+        store.setFocusedLine(closestLine, dragSide, "mouse");
       }
     };
 
@@ -2702,6 +2702,7 @@ const DiffViewer = memo(function DiffViewer({
   // Selection state for CSS-based highlighting (no per-row subscriptions)
   const focusedLine = usePRReviewSelector((s) => s.focusedLine);
   const focusedLineSide = usePRReviewSelector((s) => s.focusedLineSide);
+  const focusSource = usePRReviewSelector((s) => s.focusSource);
   const selectionAnchor = usePRReviewSelector((s) => s.selectionAnchor);
   const selectionAnchorSide = usePRReviewSelector((s) => s.selectionAnchorSide);
 
@@ -2756,8 +2757,10 @@ const DiffViewer = memo(function DiffViewer({
         }
       }
 
-      // 2. Scroll to focused line (after selection update)
-      if (focusedLine && !isDraggingState) {
+      // 2. Scroll to focused line (after selection update). Only for
+      // keyboard/programmatic focus — re-centering on mouse clicks breaks
+      // double-click word selection.
+      if (focusedLine && !isDraggingState && focusSource !== "mouse") {
         const rowIndex = getRowIndexForLine(focusedLine, focusedLineSide);
         if (rowIndex !== undefined) {
           virtualizer.scrollToIndex(rowIndex, {
@@ -2775,6 +2778,7 @@ const DiffViewer = memo(function DiffViewer({
   }, [
     focusedLine,
     focusedLineSide,
+    focusSource,
     selectionAnchor,
     selectionAnchorSide,
     isDraggingState,
@@ -3125,7 +3129,7 @@ const DiffLineRow = memo(function DiffLineRow({
             state.focusedLineSide ?? lineSide
           );
         }
-        store.setFocusedLine(lineNum, lineSide);
+        store.setFocusedLine(lineNum, lineSide, "mouse");
         const startLine = Math.min(anchor, lineNum);
         const endLine = Math.max(anchor, lineNum);
         if (startLine !== endLine) {
@@ -3154,7 +3158,7 @@ const DiffLineRow = memo(function DiffLineRow({
       }
 
       // Normal click: focus the line (clear any selection)
-      store.setFocusedLine(lineNum, lineSide);
+      store.setFocusedLine(lineNum, lineSide, "mouse");
       store.setSelectionAnchor(null, null);
     },
     [lineNum, lineSide, store]
@@ -3693,6 +3697,20 @@ const InlineCommentForm = memo(function InlineCommentForm({
   textRef.current = text;
 
   const [submitting, setSubmitting] = useState(false);
+  const formRef = useRef<HTMLDivElement>(null);
+
+  // Make sure the freshly opened form is fully visible with the smallest
+  // possible scroll (no re-centering).
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "instant",
+      });
+    });
+    // Only on mount, when the form is opened
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Persist draft text when the form unmounts without submitting
   useEffect(() => {
@@ -3799,6 +3817,7 @@ const InlineCommentForm = memo(function InlineCommentForm({
 
   return (
     <div
+      ref={formRef}
       data-inline-comment-form
       className="mx-4 my-3 rounded-lg border border-border bg-card overflow-hidden shadow-sm"
       style={{ fontFamily: "var(--font-sans)" }}

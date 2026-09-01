@@ -314,6 +314,9 @@ interface PRReviewState {
   // Line selection
   focusedLine: number | null;
   focusedLineSide: "old" | "new" | null; // 'old' for delete lines, 'new' for insert/context
+  // How the current focus was set, so the UI can react differently (e.g. only
+  // keyboard focus gets scrolled to center)
+  focusSource: "mouse" | "keyboard";
   selectionAnchor: number | null;
   selectionAnchorSide: "old" | "new" | null;
   focusedSkipBlockIndex: number | null; // Index of focused skip block for keyboard navigation
@@ -613,6 +616,7 @@ export class PRReviewStore {
       ...initialState,
       files: sortedFiles,
       viewerCanMergeAsAdmin: false,
+      focusSource: "keyboard",
 
       // PR data (loaded separately)
       reviews: [],
@@ -1890,11 +1894,13 @@ export class PRReviewStore {
 
   setFocusedLine = (
     line: number | null,
-    side: "old" | "new" | null = "new"
+    side: "old" | "new" | null = "new",
+    source: "mouse" | "keyboard" = "keyboard"
   ) => {
     this.set({
       focusedLine: line,
       focusedLineSide: line !== null ? side : null,
+      focusSource: source,
       focusedSkipBlockIndex: null, // Clear skip block focus when focusing a line
     });
   };
@@ -2184,6 +2190,7 @@ export class PRReviewStore {
           this.set({
             focusedLine: nextItem.lineNum,
             focusedLineSide: nextItem.side,
+            focusSource: "keyboard",
             focusedSkipBlockIndex: null,
             selectionAnchor: null,
             selectionAnchorSide: null,
@@ -2231,6 +2238,7 @@ export class PRReviewStore {
           this.set({
             focusedLine: nextNav.lineNum,
             focusedLineSide: nextNav.side,
+            focusSource: "keyboard",
             focusedPendingCommentId: null,
             focusedCommentId: null,
             selectionAnchor: null,
@@ -2248,6 +2256,7 @@ export class PRReviewStore {
         this.set({
           focusedLine: pendingLine,
           focusedLineSide: "new",
+          focusSource: "keyboard",
           focusedPendingCommentId: null,
           selectionAnchor: null,
           selectionAnchorSide: null,
@@ -2284,6 +2293,7 @@ export class PRReviewStore {
             this.set({
               focusedLine: nextNav.lineNum,
               focusedLineSide: nextNav.side,
+              focusSource: "keyboard",
               focusedCommentId: null,
               selectionAnchor: null,
               selectionAnchorSide: null,
@@ -2311,6 +2321,7 @@ export class PRReviewStore {
           this.set({
             focusedLine: commentLine,
             focusedLineSide: "new",
+            focusSource: "keyboard",
             focusedCommentId: null,
             selectionAnchor: null,
             selectionAnchorSide: null,
@@ -2458,6 +2469,7 @@ export class PRReviewStore {
             focusedSkipBlockIndex: nextPair.skipIndex,
             focusedLine: null,
             focusedLineSide: null,
+            focusSource: "keyboard",
             selectionAnchor: null,
             selectionAnchorSide: null,
             focusedCommentId: null,
@@ -2522,6 +2534,7 @@ export class PRReviewStore {
             this.set({
               focusedLine: nextLine,
               focusedLineSide: nextSide,
+              focusSource: "keyboard",
               selectionAnchor: selectionAnchor ?? focusedLine ?? nextLine,
               selectionAnchorSide:
                 selectionAnchorSide ?? focusedLineSide ?? nextSide,
@@ -2533,6 +2546,7 @@ export class PRReviewStore {
             this.set({
               focusedLine: nextLine,
               focusedLineSide: nextSide,
+              focusSource: "keyboard",
               selectionAnchor: null,
               selectionAnchorSide: null,
               focusedSkipBlockIndex: null,
@@ -2629,6 +2643,7 @@ export class PRReviewStore {
       this.set({
         focusedLine: nextLine,
         focusedLineSide: nextSide,
+        focusSource: "keyboard",
         selectionAnchor: selectionAnchor ?? focusedLine ?? nextLine,
         selectionAnchorSide: selectionAnchorSide ?? focusedLineSide ?? nextSide,
         focusedSkipBlockIndex: null,
@@ -2639,6 +2654,7 @@ export class PRReviewStore {
       this.set({
         focusedLine: nextLine,
         focusedLineSide: nextSide,
+        focusSource: "keyboard",
         selectionAnchor: null,
         selectionAnchorSide: null,
         focusedSkipBlockIndex: null,
@@ -3039,6 +3055,7 @@ export class PRReviewStore {
       // Focus the line the comment was on so user can continue with keyboard
       focusedLine: commentLine ?? null,
       focusedLineSide: commentLine ? "new" : null,
+      focusSource: "keyboard",
     });
     this.recomputeCommentRangeLookup();
   };
@@ -3109,6 +3126,7 @@ export class PRReviewStore {
       // Focus the line the comment was on so user can continue with keyboard
       focusedLine: commentLine ?? null,
       focusedLineSide: commentLine ? "new" : null,
+      focusSource: "keyboard",
     });
   };
 
@@ -3369,6 +3387,7 @@ export class PRReviewStore {
         this.set({
           focusedLine: end,
           focusedLineSide: "new",
+          focusSource: "keyboard",
           selectionAnchor: start,
           selectionAnchorSide: "new",
           focusedSkipBlockIndex: null,
@@ -3381,6 +3400,7 @@ export class PRReviewStore {
           this.set({
             focusedLine: line,
             focusedLineSide: "new",
+            focusSource: "keyboard",
             selectionAnchor: null,
             selectionAnchorSide: null,
             focusedSkipBlockIndex: null,

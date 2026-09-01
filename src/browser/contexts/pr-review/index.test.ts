@@ -343,6 +343,18 @@ test("setFocusedLine updates line focus", () => {
   const state = store.getSnapshot();
   expect(state.focusedLine).toBe(42);
   expect(state.focusedLineSide).toBe("new");
+  expect(state.focusSource).toBe("keyboard");
+});
+
+test("setFocusedLine records mouse source", () => {
+  const store = createStore();
+  store.selectFile("src/index.ts");
+
+  store.setFocusedLine(42, "new", "mouse");
+  expect(store.getSnapshot().focusSource).toBe("mouse");
+
+  store.setFocusedLine(43, "new");
+  expect(store.getSnapshot().focusSource).toBe("keyboard");
 });
 
 test("setFocusedLine clears skip block focus", () => {
