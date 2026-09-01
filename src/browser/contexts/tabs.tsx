@@ -50,7 +50,10 @@ interface TabContextValue {
   tabs: Tab[];
   activeTabId: string;
   activeTab: Tab | undefined;
-  openTab: (tab: Omit<Tab, "id"> & { id?: string }) => string;
+  openTab: (
+    tab: Omit<Tab, "id"> & { id?: string },
+    opts?: { background?: boolean }
+  ) => string;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   updateTabStatus: (tabId: string, status: TabStatus) => void;
@@ -143,7 +146,10 @@ export function TabProvider({ children }: TabProviderProps) {
   }, [state]);
 
   const openTab = useCallback(
-    (tabInput: Omit<Tab, "id"> & { id?: string }): string => {
+    (
+      tabInput: Omit<Tab, "id"> & { id?: string },
+      opts?: { background?: boolean }
+    ): string => {
       const id = tabInput.id || `tab-${Date.now()}`;
       const tab: Tab = { ...tabInput, id };
 
@@ -151,11 +157,11 @@ export function TabProvider({ children }: TabProviderProps) {
         // Check if tab already exists
         const existing = prev.tabs.find((t) => t.id === id);
         if (existing) {
-          return { ...prev, activeTabId: id };
+          return opts?.background ? prev : { ...prev, activeTabId: id };
         }
         return {
           tabs: [...prev.tabs, tab],
-          activeTabId: id,
+          activeTabId: opts?.background ? prev.activeTabId : id,
         };
       });
 
@@ -317,10 +323,17 @@ export function useOpenPRReviewTab() {
   const navigate = useNavigate();
 
   return useCallback(
-    (owner: string, repo: string, number: number, title?: string) => {
+    (
+      owner: string,
+      repo: string,
+      number: number,
+      title?: string,
+      opts?: { background?: boolean }
+    ) => {
       // Check if tab already exists
       const existing = getExistingPRTab(owner, repo, number);
       if (existing) {
+        if (opts?.background) return existing.id;
         setActiveTab(existing.id);
         // Navigate to the PR URL
         navigate(`/${owner}/${repo}/pull/${number}`);
@@ -329,15 +342,20 @@ export function useOpenPRReviewTab() {
 
       // Create new tab
       const id = `pr-${owner}-${repo}-${number}`;
-      const tabId = openTab({
-        id,
-        type: "pr-review",
-        label: `#${number}`,
-        prTitle: title,
-        owner,
-        repo,
-        number,
-      });
+      const tabId = openTab(
+        {
+          id,
+          type: "pr-review",
+          label: `#${number}`,
+          prTitle: title,
+          owner,
+          repo,
+          number,
+        },
+        opts
+      );
+
+      if (opts?.background) return tabId;
 
       // Navigate to the PR URL
       navigate(`/${owner}/${repo}/pull/${number}`);

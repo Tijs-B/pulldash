@@ -27,7 +27,17 @@ function Root({ onClick, children, asChild, ...props }: RootProps) {
       if (e.defaultPrevented) return;
       const link = linkRef.current;
       if (link && !link.contains(e.target as Node)) {
-        link.click();
+        // link.click() would drop modifier keys; re-dispatch with ctrl/meta so
+        // consumers can implement e.g. ctrl+click background opens.
+        link.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+          })
+        );
       }
     },
     [onClick]

@@ -997,9 +997,15 @@ export function Home() {
   }, []);
 
   const handleOpenPR = useCallback(
-    (owner: string, repo: string, number: number, title: string) => {
-      setLastViewed(`${owner}/${repo}#${number}`);
-      openPRReviewTab(owner, repo, number, title);
+    (
+      owner: string,
+      repo: string,
+      number: number,
+      title: string,
+      opts?: { background?: boolean }
+    ) => {
+      if (!opts?.background) setLastViewed(`${owner}/${repo}#${number}`);
+      openPRReviewTab(owner, repo, number, title, opts);
     },
     [openPRReviewTab]
   );
@@ -1933,7 +1939,8 @@ interface PRListItemProps {
     owner: string,
     repo: string,
     number: number,
-    title: string
+    title: string,
+    opts?: { background?: boolean }
   ) => void;
 }
 
@@ -1968,14 +1975,19 @@ function PRListItem({ pr, onSelect }: PRListItemProps) {
     : undefined;
 
   const handleLinkClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
-    // Let the browser handle modifier clicks natively (new tab/window).
-    if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-      return;
-    }
-    if (repoInfo) {
-      e.preventDefault();
-      onSelect(repoInfo.owner, repoInfo.repo, pr.number, pr.title);
-    }
+    // Let the browser handle shift/alt clicks natively (new window).
+    if (e.button !== 0 || e.shiftKey || e.altKey) return;
+    if (!repoInfo) return;
+    e.preventDefault();
+    // Ctrl/meta+click opens the PR in a background tab without leaving home.
+    const background = e.metaKey || e.ctrlKey;
+    onSelect(
+      repoInfo.owner,
+      repoInfo.repo,
+      pr.number,
+      pr.title,
+      background ? { background: true } : undefined
+    );
   };
 
   // CI status indicator with details
