@@ -374,6 +374,9 @@ export const PROverview = memo(function PROverview() {
         author_association: newComment.author_association,
         actor: newComment.user!,
       } as TimelineEvent);
+      // Invalidate so later timeline refetches can't serve the cached
+      // pre-comment timeline and drop the local event.
+      github.invalidatePR(owner, repo, pr.number);
       setCommentText("");
     } catch (error) {
       console.error("Failed to add comment:", error);
@@ -990,6 +993,8 @@ export const PROverview = memo(function PROverview() {
         await github.createPRComment(owner, repo, pr.number, body, {
           reply_to_id: commentId,
         });
+        // Invalidate so the refetches below can't serve stale cached data
+        github.invalidatePR(owner, repo, pr.number);
         // Refresh threads to show new comment
         const result = await github.getReviewThreads(owner, repo, pr.number);
         store.setReviewThreads(result.threads);
@@ -1059,6 +1064,8 @@ export const PROverview = memo(function PROverview() {
   );
 
   const refreshConversation = useCallback(async () => {
+    // Invalidate so the refetch below can't serve the stale cached timeline
+    github.invalidatePR(owner, repo, pr.number);
     const [newComments, newTimeline] = await Promise.all([
       github.getPRComments(owner, repo, pr.number).catch(() => []),
       github.getPRTimeline(owner, repo, pr.number).catch(() => []),

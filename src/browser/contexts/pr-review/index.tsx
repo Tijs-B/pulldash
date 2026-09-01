@@ -3982,6 +3982,9 @@ export class PRReviewStore {
     try {
       await this.github.deleteBranch(owner, repo, pr.head.ref);
 
+      // Invalidate so the refetch below can't serve the stale cached timeline
+      this.invalidatePRCaches(owner, repo, pr.number);
+
       // Refetch timeline to show delete event
       const updatedTimeline = await this.github
         .getPRTimeline(owner, repo, pr.number)
@@ -4011,6 +4014,9 @@ export class PRReviewStore {
 
     try {
       await this.github.restoreBranch(owner, repo, pr.head.ref, pr.head.sha);
+
+      // Invalidate so the refetch below can't serve the stale cached timeline
+      this.invalidatePRCaches(owner, repo, pr.number);
 
       // Refetch timeline to show restore event
       const updatedTimeline = await this.github

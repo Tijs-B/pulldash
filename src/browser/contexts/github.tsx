@@ -2267,12 +2267,22 @@ function createGitHubStore() {
     reviewId: string,
     event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
     body?: string
-  ): Promise<void> {
+  ): Promise<{ databaseId: number; submittedAt: string | null } | null> {
     if (!batcher) throw new Error("Not initialized");
-    await batcher.query(
-      `mutation ($input: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $input) { pullRequestReview { id } } }`,
+    const result = await batcher.query<{
+      submitPullRequestReview: {
+        pullRequestReview: {
+          databaseId: number;
+          submittedAt: string | null;
+        } | null;
+      } | null;
+    }>(
+      `mutation ($input: SubmitPullRequestReviewInput!) { submitPullRequestReview(input: $input) { pullRequestReview { databaseId submittedAt } } }`,
       { input: { pullRequestReviewId: reviewId, event, body: body ?? "" } }
     );
+    const review = result.submitPullRequestReview?.pullRequestReview;
+    if (!review) return null;
+    return { databaseId: review.databaseId, submittedAt: review.submittedAt };
   }
 
   async function getReviewReactions(reviewNodeId: string): Promise<Reaction[]> {
