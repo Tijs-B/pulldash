@@ -136,6 +136,29 @@ export const queries = {
       meta: { persist: true },
     }),
 
+  orgTeams: (org: string) =>
+    queryOptions({
+      queryKey: ["org-teams", org],
+      queryFn: async ({ signal }) => {
+        try {
+          const res = await getOctokit().request("GET /orgs/{org}/teams", {
+            org,
+            per_page: 100,
+            request: { signal },
+          });
+          return res.data as components["schemas"]["team-simple"][];
+        } catch (e) {
+          // Personal repos have no organization teams.
+          if (e && typeof e === "object" && "status" in e && e.status === 404) {
+            return [];
+          }
+          throw e;
+        }
+      },
+      staleTime: 5 * 60_000,
+      meta: { persist: true },
+    }),
+
   labels: (owner: string, repo: string) =>
     queryOptions({
       queryKey: ["labels", owner, repo],

@@ -60,6 +60,7 @@ import {
 import { getTimeAgo, formatDateTime } from "../lib/dates";
 import { parseDiffCached, type ParsedDiff } from "../lib/diff";
 import type { ReviewComment } from "@/api/types";
+import type { components } from "@octokit/openapi-types";
 import { useQuery } from "@tanstack/react-query";
 import { queries } from "../lib/queries";
 import { useOpenPRReviewTab } from "../contexts/tabs";
@@ -229,6 +230,10 @@ export const PROverview = memo(function PROverview() {
   const { ready } = useGitHubReady();
   const { data: collaboratorsRaw = [], isLoading: loadingCollaborators } =
     useQuery({ ...queries.collaborators(owner, repo), enabled: ready });
+  const { data: orgTeams = [], isLoading: loadingOrgTeams } = useQuery({
+    ...queries.orgTeams(owner),
+    enabled: ready,
+  });
   const collaborators = collaboratorsRaw.map((c) => ({
     login: c.login || "",
     avatar_url: c.avatar_url || "",
@@ -547,18 +552,51 @@ export const PROverview = memo(function PROverview() {
     [github, owner, repo, pr, store, collaborators, refetchTimeline]
   );
 
-  const handleRemoveReviewer = useCallback(
-    async (login: string) => {
+  const handleRequestTeam = useCallback(
+    async (team: components["schemas"]["team-simple"]) => {
       try {
-        // 1. Request GitHub to remove reviewer
-        await github.removeReviewers(owner, repo, pr.number, [login]);
+        // 1. Request GitHub to add the team as reviewer
+        await github.requestReviewers(owner, repo, pr.number, [], [team.slug]);
 
         // 2. Update our state with the known change
         store.setPr({
           ...pr,
-          requested_reviewers: (pr.requested_reviewers ?? []).filter(
-            (r) => r.login !== login
-          ),
+          requested_teams: [...(pr.requested_teams ?? []), team],
+        });
+
+        // 3. Invalidate cache so future fetches get fresh data
+        github.invalidatePR(owner, repo, pr.number);
+
+        // 4. Refetch timeline (reviewer request creates event)
+        refetchTimeline();
+      } catch (error) {
+        console.error("Failed to request team reviewer:", error);
+      }
+    },
+    [github, owner, repo, pr, store, refetchTimeline]
+  );
+
+  const handleRemoveReviewer = useCallback(
+    async (login: string, isTeam = false) => {
+      try {
+        // 1. Request GitHub to remove reviewer
+        await github.removeReviewers(
+          owner,
+          repo,
+          pr.number,
+          isTeam ? [] : [login],
+          isTeam ? [login] : []
+        );
+
+        // 2. Update our state with the known change
+        store.setPr({
+          ...pr,
+          requested_reviewers: isTeam
+            ? pr.requested_reviewers
+            : (pr.requested_reviewers ?? []).filter((r) => r.login !== login),
+          requested_teams: isTeam
+            ? (pr.requested_teams ?? []).filter((t) => t.slug !== login)
+            : pr.requested_teams,
         });
 
         // 3. Invalidate cache so future fetches get fresh data
@@ -2294,13 +2332,20 @@ export const PROverview = memo(function PROverview() {
                                 : "Awaiting review from this user"}
                             </TooltipContent>
                           </Tooltip>
-                          {!reviewer.isTeam && canMergeRepo && !pr.merged && (
+                          {canMergeRepo && !pr.merged && (
                             <button
                               onClick={() =>
-                                handleRemoveReviewer(reviewer.login)
+                                handleRemoveReviewer(
+                                  reviewer.login,
+                                  reviewer.isTeam
+                                )
                               }
                               className="p-0.5 text-muted-foreground hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                              title="Remove reviewer"
+                              title={
+                                reviewer.isTeam
+                                  ? "Remove team review request"
+                                  : "Remove reviewer"
+                              }
                             >
                               <X className="w-3 h-3" />
                             </button>
@@ -2347,48 +2392,86 @@ export const PROverview = memo(function PROverview() {
                     <input
                       ref={reviewerSearchInputRef}
                       type="text"
-                      placeholder="Search users..."
+                      placeholder="Search users or teams..."
                       value={reviewerSearchQuery}
                       onChange={(e) => setReviewerSearchQuery(e.target.value)}
                       className="w-full px-2 py-1.5 text-sm bg-muted border border-border rounded-md focus:outline-none focus:ring-1 focus:ring-primary"
                     />
                   </div>
                   <div className="max-h-[300px] overflow-auto">
-                    {loadingCollaborators ? (
+                    {loadingCollaborators || loadingOrgTeams ? (
                       <div className="p-4 text-center text-sm text-muted-foreground">
                         <Loader2 className="w-4 h-4 animate-spin mx-auto" />
                       </div>
                     ) : (
-                      collaborators
-                        .filter(
-                          (c) =>
-                            c.login !== pr.user?.login &&
-                            !pr.requested_reviewers?.some(
-                              (r) => r.login === c.login
-                            ) &&
-                            c.login
-                              .toLowerCase()
-                              .includes(reviewerSearchQuery.toLowerCase())
-                        )
-                        .map((collaborator) => (
-                          <button
-                            key={collaborator.login}
-                            onClick={() => {
-                              handleRequestReviewer(collaborator.login);
-                              setShowReviewersPicker(false);
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
-                          >
-                            <img
-                              src={collaborator.avatar_url}
-                              alt={collaborator.login}
-                              className="w-5 h-5 rounded-full"
-                            />
-                            <span className="text-sm">
-                              {collaborator.login}
-                            </span>
-                          </button>
-                        ))
+                      <>
+                        {collaborators
+                          .filter(
+                            (c) =>
+                              c.login !== pr.user?.login &&
+                              !pr.requested_reviewers?.some(
+                                (r) => r.login === c.login
+                              ) &&
+                              c.login
+                                .toLowerCase()
+                                .includes(reviewerSearchQuery.toLowerCase())
+                          )
+                          .map((collaborator) => (
+                            <button
+                              key={collaborator.login}
+                              onClick={() => {
+                                handleRequestReviewer(collaborator.login);
+                                setShowReviewersPicker(false);
+                              }}
+                              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
+                            >
+                              <img
+                                src={collaborator.avatar_url}
+                                alt={collaborator.login}
+                                className="w-5 h-5 rounded-full"
+                              />
+                              <span className="text-sm">
+                                {collaborator.login}
+                              </span>
+                            </button>
+                          ))}
+                        {orgTeams.length > 0 && (
+                          <div className="px-3 pt-2 pb-1 text-xs font-medium text-muted-foreground">
+                            Teams
+                          </div>
+                        )}
+                        {orgTeams
+                          .filter(
+                            (t) =>
+                              !pr.requested_teams?.some(
+                                (r) => r.slug === t.slug
+                              ) &&
+                              (t.slug
+                                .toLowerCase()
+                                .includes(reviewerSearchQuery.toLowerCase()) ||
+                                (t.name ?? "")
+                                  .toLowerCase()
+                                  .includes(reviewerSearchQuery.toLowerCase()))
+                          )
+                          .map((team) => (
+                            <button
+                              key={team.id}
+                              onClick={() => {
+                                handleRequestTeam(team);
+                                setShowReviewersPicker(false);
+                              }}
+                              className="w-full flex items-center gap-2 px-3 py-2 hover:bg-muted transition-colors text-left"
+                            >
+                              <Users className="w-5 h-5 p-0.5 text-muted-foreground shrink-0" />
+                              <span className="text-sm font-medium">
+                                {team.slug}
+                              </span>
+                              <span className="text-xs text-muted-foreground truncate">
+                                {team.name}
+                              </span>
+                            </button>
+                          ))}
+                      </>
                     )}
                   </div>
                 </div>

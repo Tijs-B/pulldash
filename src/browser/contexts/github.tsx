@@ -1326,7 +1326,8 @@ function createGitHubStore() {
     owner: string,
     repo: string,
     number: number,
-    reviewers: string[]
+    reviewers: string[],
+    teamReviewers?: string[]
   ) {
     if (!octokit) throw new Error("Not initialized");
 
@@ -1337,6 +1338,7 @@ function createGitHubStore() {
         repo,
         pull_number: number,
         reviewers,
+        ...(teamReviewers?.length ? { team_reviewers: teamReviewers } : {}),
       }
     );
 
@@ -1348,7 +1350,8 @@ function createGitHubStore() {
     owner: string,
     repo: string,
     number: number,
-    reviewers: string[]
+    reviewers: string[],
+    teamReviewers?: string[]
   ) {
     if (!octokit) throw new Error("Not initialized");
 
@@ -1359,6 +1362,7 @@ function createGitHubStore() {
         repo,
         pull_number: number,
         reviewers,
+        ...(teamReviewers?.length ? { team_reviewers: teamReviewers } : {}),
       }
     );
 
