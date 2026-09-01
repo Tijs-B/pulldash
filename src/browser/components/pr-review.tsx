@@ -1299,7 +1299,15 @@ const DiffPanel = memo(function DiffPanel() {
               ) : (
                 <div className="p-4 text-sm text-muted-foreground text-center flex-1 flex items-center justify-center">
                   {!currentFile.patch
-                    ? "Binary file or file too large to display"
+                    ? currentFile.status === "removed"
+                      ? "File deleted"
+                      : currentFile.status === "renamed"
+                        ? "File renamed without changes"
+                        : currentFile.sha ===
+                            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+                          ? // Git's empty-blob SHA: the file exists but has no content
+                            "Empty file"
+                          : "Binary file or file too large to display"
                     : "No changes to display"}
                 </div>
               )}
