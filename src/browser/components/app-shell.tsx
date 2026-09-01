@@ -131,6 +131,11 @@ export function AppShell() {
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+  // Bumped when a notification fires for the active PR tab so the tab content
+  // remounts and refetches instead of showing stale data.
+  const [prRefreshEpochs, setPrRefreshEpochs] = useState<
+    Record<string, number>
+  >({});
 
   const updateScrollArrows = useCallback(() => {
     const el = tabScrollRef.current;
@@ -384,6 +389,18 @@ export function AppShell() {
                 `https://avatars.githubusercontent.com/${tab.owner}`
               );
               setNotifiedAt(prId, enrichment.updatedAt);
+              // Drop cached PR data so the tab refetches on next visit.
+              queryClient.invalidateQueries({
+                queryKey: ["pull-request", tab.owner, tab.repo, tab.number],
+              });
+              // If the user is looking at this PR right now, remount it so the
+              // new activity is visible immediately.
+              if (tab.id === activeTab?.id) {
+                setPrRefreshEpochs((prev) => ({
+                  ...prev,
+                  [tab.id]: (prev[tab.id] ?? 0) + 1,
+                }));
+              }
               if (isRepoInHomeFilters(tab.owner, tab.repo)) {
                 queryClient.invalidateQueries({ queryKey: ["pr-list"] });
               }
@@ -420,6 +437,10 @@ export function AppShell() {
               `https://avatars.githubusercontent.com/${owner}`
             );
             setNotifiedAt(prId, enrichment.updatedAt);
+            // Drop cached PR data so a reopened tab refetches.
+            queryClient.invalidateQueries({
+              queryKey: ["pull-request", owner, repo, number],
+            });
             if (isRepoInHomeFilters(owner, repo, pr.state)) {
               queryClient.invalidateQueries({ queryKey: ["pr-list"] });
             }
@@ -446,6 +467,7 @@ export function AppShell() {
     markTabUpdated,
     clearTabUpdated,
     queryClient,
+    setPrRefreshEpochs,
   ]);
 
   // Clear tabs when user logs out
@@ -577,7 +599,14 @@ export function AppShell() {
           activeTab.owner &&
           activeTab.repo &&
           activeTab.number && (
-            <div key={activeTab.id} className="absolute inset-0">
+            <div
+              key={
+                prRefreshEpochs[activeTab.id]
+                  ? `${activeTab.id}:${prRefreshEpochs[activeTab.id]}`
+                  : activeTab.id
+              }
+              className="absolute inset-0"
+            >
               <PRReviewContent
                 owner={activeTab.owner}
                 repo={activeTab.repo}
