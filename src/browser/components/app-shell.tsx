@@ -20,6 +20,7 @@ import {
 } from "../contexts/tabs";
 import { useGitHubStore, type PREnrichment } from "../contexts/github";
 import { getLastViewed, setLastViewed } from "../lib/waiting-prs";
+import { parsePRUrl } from "../lib/pr-url";
 import {
   getEnabled as notifsEnabled,
   sendNotification,
@@ -127,6 +128,7 @@ export function AppShell() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const githubStore = useGitHubStore();
+  const openPRReviewTab = useOpenPRReviewTab();
 
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
@@ -136,6 +138,9 @@ export function AppShell() {
   const [prRefreshEpochs, setPrRefreshEpochs] = useState<
     Record<string, number>
   >({});
+  // Transient hint for the "open PR from clipboard" shortcut
+  const [clipboardHint, setClipboardHint] = useState<string | null>(null);
+  const [hintClosing, setHintClosing] = useState(false);
 
   const updateScrollArrows = useCallback(() => {
     const el = tabScrollRef.current;
@@ -306,6 +311,41 @@ export function AppShell() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [tabs, activeTabId, handleTabSelect, handleTabClose]);
+
+  // Open a PR whose URL is pasted outside a text field (Cmd/Ctrl+V). Uses the
+  // paste event rather than navigator.clipboard.readText(), which would show a
+  // permission popup on Firefox-based browsers.
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return; // let the text field handle the paste
+      }
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      const parsed = parsePRUrl(text.trim());
+      if (parsed) {
+        e.preventDefault();
+        openPRReviewTab(parsed.owner, parsed.repo, parsed.number);
+      } else if (text.trim()) {
+        setClipboardHint("No PR URL in clipboard");
+      }
+    };
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [openPRReviewTab]);
+
+  // Auto-dismiss the clipboard hint
+  useEffect(() => {
+    if (!clipboardHint) return;
+    setHintClosing(false);
+    const timer = setTimeout(() => setHintClosing(true), 2500);
+    return () => clearTimeout(timer);
+  }, [clipboardHint]);
 
   // Reset title when switching to home tab
   useEffect(() => {
@@ -621,6 +661,25 @@ export function AppShell() {
             </div>
           )}
       </div>
+
+      {clipboardHint && (
+        <div
+          onAnimationEnd={() => {
+            if (hintClosing) {
+              setClipboardHint(null);
+              setHintClosing(false);
+            }
+          }}
+          className={cn(
+            "fixed bottom-4 right-4 z-[200] bg-yellow-400 border border-yellow-500 rounded-md shadow-lg px-3 py-1.5 text-xs font-medium text-yellow-950",
+            hintClosing
+              ? "animate-out slide-out-to-right fade-out fill-mode-forwards duration-200"
+              : "animate-in slide-in-from-right fade-in duration-200"
+          )}
+        >
+          {clipboardHint}
+        </div>
+      )}
     </div>
   );
 }
@@ -838,10 +897,9 @@ function PRUrlInput() {
       const url = prUrl.trim();
       if (!url) return;
 
-      const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-      if (match) {
-        const [, owner, repo, number] = match;
-        openPRReviewTab(owner, repo, parseInt(number, 10));
+      const parsed = parsePRUrl(url);
+      if (parsed) {
+        openPRReviewTab(parsed.owner, parsed.repo, parsed.number);
         setPrUrl("");
       }
     },

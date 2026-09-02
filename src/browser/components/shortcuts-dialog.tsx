@@ -43,6 +43,15 @@ const SECTIONS: ShortcutSection[] = [
         keys: [[["cmd", "shift", "left"]], [["cmd", "shift", "right"]]],
         description: "Previous / next tab",
       },
+      {
+        keys: [
+          [
+            ["cmd", "v"],
+            ["ctrl", "v"],
+          ],
+        ],
+        description: "Open PR from URL pasted outside a text field",
+      },
     ],
   },
   {
