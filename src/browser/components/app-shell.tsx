@@ -18,8 +18,8 @@ import {
   type Tab,
   type TabStatus,
 } from "../contexts/tabs";
-import { useGitHubStore, type PREnrichment } from "../contexts/github";
-import { getLastViewed, setLastViewed } from "../lib/waiting-prs";
+import { useGitHubStore } from "../contexts/github";
+import { setLastViewed } from "../lib/waiting-prs";
 import { parsePRUrl } from "../lib/pr-url";
 import {
   getEnabled as notifsEnabled,
@@ -233,7 +233,7 @@ export function AppShell() {
         tab.repo &&
         tab.number !== undefined
       ) {
-        markTabUpdated(tab.id);
+        clearTabUpdated(tab.id);
         setLastViewed(`${tab.owner}/${tab.repo}#${tab.number}`);
       }
       if (tab.type === "home") {
@@ -247,7 +247,7 @@ export function AppShell() {
         navigate(`/${tab.owner}/${tab.repo}/pull/${tab.number}`);
       }
     },
-    [navigate, markTabUpdated]
+    [navigate, clearTabUpdated]
   );
 
   // Close a tab and navigate to the next active tab if needed
@@ -354,161 +354,151 @@ export function AppShell() {
     }
   }, [activeTabId, isAuthenticated]);
 
-  // Poll PR activity every 60s
-  useEffect(() => {
-    const POLL_INTERVAL = 60000;
-    let interval: ReturnType<typeof setInterval> | null = null;
+  const checkPRs = useCallback(async () => {
+    if (!notifsEnabled()) return;
+    try {
+      const prTabs = tabs.filter(
+        (t): t is Tab & { owner: string; repo: string; number: number } =>
+          t.type === "pr-review" &&
+          t.owner !== undefined &&
+          t.repo !== undefined &&
+          t.number !== undefined
+      );
 
-    const getBaseline = (
-      viewerLastViewedAt: string | null,
-      enrichment: PREnrichment | null
-    ): string | null => {
-      const dates: string[] = [];
-      if (viewerLastViewedAt) dates.push(viewerLastViewedAt);
-      if (enrichment?.isReadByViewer && enrichment.updatedAt)
-        dates.push(enrichment.updatedAt);
-      return dates.length > 0 ? dates.reduce((a, b) => (a > b ? a : b)) : null;
-    };
+      const involvedPRs = await githubStore.fetchInvolvedPRs().catch(() => []);
 
-    const checkPRs = async () => {
-      if (!notifsEnabled()) return;
-      try {
-        const prTabs = tabs.filter(
-          (t): t is Tab & { owner: string; repo: string; number: number } =>
-            t.type === "pr-review" &&
-            t.owner !== undefined &&
-            t.repo !== undefined &&
-            t.number !== undefined
-        );
+      const prSet = new Map<
+        string,
+        { owner: string; repo: string; number: number }
+      >();
+      const addPr = (owner: string, repo: string, number: number) => {
+        prSet.set(`${owner}/${repo}/${number}`, { owner, repo, number });
+      };
+      for (const tab of prTabs) addPr(tab.owner, tab.repo, tab.number);
+      for (const pr of involvedPRs) {
+        const match = pr.repository_url?.match(/repos\/([^/]+)\/([^/]+)/);
+        if (match && pr.number) addPr(match[1], match[2], pr.number);
+      }
+      if (prSet.size === 0) return;
 
-        const involvedPRs = await githubStore.fetchInvolvedPRs();
+      const enrichmentMap = await githubStore.getPREnrichment([
+        ...prSet.values(),
+      ]);
 
-        const prSet = new Map<
-          string,
-          { owner: string; repo: string; number: number }
-        >();
-        const addPr = (owner: string, repo: string, number: number) => {
-          prSet.set(`${owner}/${repo}/${number}`, { owner, repo, number });
-        };
-        for (const tab of prTabs) addPr(tab.owner, tab.repo, tab.number);
-        for (const pr of involvedPRs) {
-          const match = pr.repository_url?.match(/repos\/([^/]+)\/([^/]+)/);
-          if (match && pr.number) addPr(match[1], match[2], pr.number);
-        }
-        if (prSet.size === 0) return;
+      const tabPrIds = new Set(
+        prTabs.map((t) => `${t.owner}/${t.repo}#${t.number}`)
+      );
+      const notifiedThisCycle = new Set<string>();
 
-        const enrichmentMap = await githubStore.getPREnrichment([
-          ...prSet.values(),
-        ]);
-
-        const tabPrIds = new Set(
-          prTabs.map((t) => `${t.owner}/${t.repo}#${t.number}`)
-        );
-        const notifiedThisCycle = new Set<string>();
-
-        for (const tab of prTabs) {
-          const key = `${tab.owner}/${tab.repo}/${tab.number}`;
-          const prId = `${tab.owner}/${tab.repo}#${tab.number}`;
-          const enrichment = enrichmentMap.get(key);
-          if (!enrichment) continue;
-          const viewerLastViewedAt = getLastViewed(prId);
-          const baseline = getBaseline(viewerLastViewedAt, enrichment);
-          if (baseline && enrichment.updatedAt > baseline) {
+      for (const tab of prTabs) {
+        const key = `${tab.owner}/${tab.repo}/${tab.number}`;
+        const prId = `${tab.owner}/${tab.repo}#${tab.number}`;
+        const enrichment = enrichmentMap.get(key);
+        if (!enrichment) continue;
+        // Process each new activity value exactly once (getNotifiedAt tracks
+        // the last processed updatedAt): refresh cached data, badge the tab,
+        // and remount it if the user is looking at it right now.
+        if (
+          !notifiedThisCycle.has(prId) &&
+          enrichment.updatedAt > (getNotifiedAt(prId) ?? "")
+        ) {
+          notifiedThisCycle.add(prId);
+          setNotifiedAt(prId, enrichment.updatedAt);
+          // Drop cached PR data so the tab refetches on next visit.
+          queryClient.invalidateQueries({
+            queryKey: ["pull-request", tab.owner, tab.repo, tab.number],
+          });
+          // If the user is looking at this PR right now, remount it so the
+          // new activity is visible immediately. Otherwise badge it.
+          if (tab.id === activeTab?.id) {
+            setPrRefreshEpochs((prev) => ({
+              ...prev,
+              [tab.id]: (prev[tab.id] ?? 0) + 1,
+            }));
+          } else {
             markTabUpdated(tab.id);
-            if (
-              notifsEnabled() &&
-              !notifiedThisCycle.has(prId) &&
-              enrichment.updatedAt > (getNotifiedAt(prId) ?? "")
-            ) {
-              notifiedThisCycle.add(prId);
-              const prUrl = `/${tab.owner}/${tab.repo}/pull/${tab.number}`;
-              sendNotification(
-                `New activity on ${tab.owner}/${tab.repo} PR #${tab.number}`,
-                tab.prTitle || `#${tab.number}`,
-                prUrl,
-                `https://avatars.githubusercontent.com/${tab.owner}`
-              );
-              setNotifiedAt(prId, enrichment.updatedAt);
-              // Drop cached PR data so the tab refetches on next visit.
-              queryClient.invalidateQueries({
-                queryKey: ["pull-request", tab.owner, tab.repo, tab.number],
-              });
-              // If the user is looking at this PR right now, remount it so the
-              // new activity is visible immediately.
-              if (tab.id === activeTab?.id) {
-                setPrRefreshEpochs((prev) => ({
-                  ...prev,
-                  [tab.id]: (prev[tab.id] ?? 0) + 1,
-                }));
-              }
-              if (isRepoInHomeFilters(tab.owner, tab.repo)) {
-                queryClient.invalidateQueries({ queryKey: ["pr-list"] });
-              }
-            }
           }
-        }
-
-        for (const pr of involvedPRs) {
-          const match = pr.repository_url?.match(/repos\/([^/]+)\/([^/]+)/);
-          if (!match || !pr.number) continue;
-          const owner = match[1];
-          const repo = match[2];
-          const number = pr.number;
-          const prId = `${owner}/${repo}#${number}`;
-          const prKey = `${owner}/${repo}/${number}`;
-          if (tabPrIds.has(prId)) continue;
-
-          const enrichment = enrichmentMap.get(prKey);
-          if (!enrichment) continue;
-          const viewerLastViewedAt = getLastViewed(prId);
-          const baseline = getBaseline(viewerLastViewedAt, enrichment);
-          if (
-            notifsEnabled() &&
-            !notifiedThisCycle.has(prId) &&
-            enrichment.updatedAt > (getNotifiedAt(prId) ?? "") &&
-            (!baseline || enrichment.updatedAt > baseline)
-          ) {
-            notifiedThisCycle.add(prId);
-            const prUrl = `/${owner}/${repo}/pull/${number}`;
+          // GitHub reports the thread as read for the viewer's own activity
+          // (or after visiting it on github.com) — only notify about unread
+          // activity.
+          if (notifsEnabled() && !enrichment.isReadByViewer) {
+            const prUrl = `/${tab.owner}/${tab.repo}/pull/${tab.number}`;
             sendNotification(
-              `New activity on ${owner}/${repo} PR #${number}`,
-              pr.title,
+              `New activity on ${tab.owner}/${tab.repo} PR #${tab.number}`,
+              tab.prTitle || `#${tab.number}`,
               prUrl,
-              `https://avatars.githubusercontent.com/${owner}`
+              `https://avatars.githubusercontent.com/${tab.owner}`
             );
-            setNotifiedAt(prId, enrichment.updatedAt);
-            // Drop cached PR data so a reopened tab refetches.
-            queryClient.invalidateQueries({
-              queryKey: ["pull-request", owner, repo, number],
-            });
-            if (isRepoInHomeFilters(owner, repo, pr.state)) {
+            if (isRepoInHomeFilters(tab.owner, tab.repo)) {
               queryClient.invalidateQueries({ queryKey: ["pr-list"] });
             }
           }
         }
-      } catch {
-        // Ignore transient network errors during polling
       }
-    };
 
-    const startPolling = () => {
-      checkPRs();
-      interval = setInterval(checkPRs, POLL_INTERVAL);
-    };
+      for (const pr of involvedPRs) {
+        const match = pr.repository_url?.match(/repos\/([^/]+)\/([^/]+)/);
+        if (!match || !pr.number) continue;
+        const owner = match[1];
+        const repo = match[2];
+        const number = pr.number;
+        const prId = `${owner}/${repo}#${number}`;
+        const prKey = `${owner}/${repo}/${number}`;
+        if (tabPrIds.has(prId)) continue;
 
-    startPolling();
-    return () => {
-      if (interval) clearInterval(interval);
-    };
+        const enrichment = enrichmentMap.get(prKey);
+        if (!enrichment) continue;
+        if (
+          !notifiedThisCycle.has(prId) &&
+          enrichment.updatedAt > (getNotifiedAt(prId) ?? "") &&
+          !enrichment.isReadByViewer
+        ) {
+          notifiedThisCycle.add(prId);
+          const prUrl = `/${owner}/${repo}/pull/${number}`;
+          sendNotification(
+            `New activity on ${owner}/${repo} PR #${number}`,
+            pr.title,
+            prUrl,
+            `https://avatars.githubusercontent.com/${owner}`
+          );
+          setNotifiedAt(prId, enrichment.updatedAt);
+          // Drop cached PR data so a reopened tab refetches.
+          queryClient.invalidateQueries({
+            queryKey: ["pull-request", owner, repo, number],
+          });
+          if (isRepoInHomeFilters(owner, repo, pr.state)) {
+            queryClient.invalidateQueries({ queryKey: ["pr-list"] });
+          }
+        }
+      }
+    } catch (e) {
+      // Swallow transient network errors, but log them: a silently dead poll
+      // is indistinguishable from "no new activity".
+      console.warn("PR activity poll failed", e);
+    }
   }, [
     tabs,
     activeTab,
     githubStore,
     markTabUpdated,
-    clearTabUpdated,
     queryClient,
     setPrRefreshEpochs,
   ]);
+
+  // Poll PR activity every 60s. The interval lives in a stable effect and
+  // reads the latest checkPRs via a ref: depending on `tabs` directly would
+  // reset the interval on every tab update (e.g. the 30s checks polling) and
+  // starve it before it ever fires while a PR page is open.
+  const checkPRsRef = useRef(checkPRs);
+  useEffect(() => {
+    checkPRsRef.current = checkPRs;
+  });
+
+  useEffect(() => {
+    checkPRsRef.current();
+    const interval = setInterval(() => checkPRsRef.current(), 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Clear tabs when user logs out
   useEffect(() => {

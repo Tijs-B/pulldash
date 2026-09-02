@@ -218,6 +218,20 @@ export function TabProvider({ children }: TabProviderProps) {
       const tabIndex = prev.tabs.findIndex((t) => t.id === tabId);
       if (tabIndex === -1) return prev;
 
+      const current = prev.tabs[tabIndex].status;
+      // Skip identical statuses: the checks polling syncs every 30s and a
+      // write here would churn the tabs array (re-rendering every consumer)
+      // for nothing.
+      if (
+        current &&
+        current.checks === status.checks &&
+        current.state === status.state &&
+        current.mergeable === status.mergeable &&
+        current.inMergeQueue === status.inMergeQueue
+      ) {
+        return prev;
+      }
+
       const newTabs = [...prev.tabs];
       newTabs[tabIndex] = { ...newTabs[tabIndex], status };
       return { ...prev, tabs: newTabs };
@@ -229,7 +243,7 @@ export function TabProvider({ children }: TabProviderProps) {
       const tabIndex = prev.tabs.findIndex((t) => t.id === tabId);
       if (tabIndex === -1) return prev;
       const tab = prev.tabs[tabIndex];
-      if (!tab.status) return prev;
+      if (!tab.status || tab.status.updated) return prev;
       const newTabs = [...prev.tabs];
       newTabs[tabIndex] = {
         ...tab,
@@ -244,7 +258,7 @@ export function TabProvider({ children }: TabProviderProps) {
       const tabIndex = prev.tabs.findIndex((t) => t.id === tabId);
       if (tabIndex === -1) return prev;
       const tab = prev.tabs[tabIndex];
-      if (!tab.status) return prev;
+      if (!tab.status || !tab.status.updated) return prev;
       const newTabs = [...prev.tabs];
       newTabs[tabIndex] = {
         ...tab,
