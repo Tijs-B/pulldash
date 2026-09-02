@@ -38,6 +38,7 @@ import {
 import { diffService } from "@/browser/lib/diff";
 import { queryClient } from "@/browser/lib/query-client";
 import { queries } from "@/browser/lib/queries";
+import { subscribePRRefresh } from "@/browser/lib/pr-refresh-bus";
 
 // ============================================================================
 // File Sorting (match file tree order)
@@ -2980,6 +2981,21 @@ export class PRReviewStore {
     this.set({ pr });
   };
 
+  setFiles = (files: PullRequestFile[]) => {
+    this.set({ files });
+  };
+
+  /** Refetch activity data (threads, reviews, conversation, timeline) in
+   *  place when the poll detects new activity — no loading states, so the
+   *  page updates without flashing or losing scroll position. */
+  reloadActivity = async (): Promise<void> => {
+    const { owner, repo, pr } = this.state;
+    await Promise.all([
+      this.loadPRData(),
+      this.loadOverviewData(owner, repo, pr.number, { force: true }),
+    ]);
+  };
+
   setFocusedCommentId = (id: number | null) => {
     this.set({ focusedCommentId: id });
   };
@@ -3530,7 +3546,8 @@ export class PRReviewStore {
   private loadOverviewData = async (
     owner: string,
     repo: string,
-    prNumber: number
+    prNumber: number,
+    opts?: { force?: boolean }
   ): Promise<void> => {
     try {
       const [reviewsData, conversationData, timelineData] = await Promise.all([
@@ -3564,8 +3581,9 @@ export class PRReviewStore {
       }
 
       // If overviewLoading is already false, fresher data was set
-      // (e.g. by submitReview), so don't overwrite it.
-      if (!this.state.overviewLoading) return;
+      // (e.g. by submitReview), so don't overwrite it — unless this is an
+      // explicit forced refresh.
+      if (!opts?.force && !this.state.overviewLoading) return;
 
       this.set({
         reviews: reviewsData,
@@ -4341,10 +4359,26 @@ export function PRReviewProvider({
     storeRef.current?.setComments(comments);
   }, [comments]);
 
+  // Sync pr + files from props (in-place refreshes update them)
+  useEffect(() => {
+    storeRef.current?.setPr(pr);
+  }, [pr]);
+
+  useEffect(() => {
+    storeRef.current?.setFiles(files);
+  }, [files]);
+
   // Sync viewerPermission from props
   useEffect(() => {
     storeRef.current?.setViewerPermission(viewerPermission);
   }, [viewerPermission]);
+
+  // Refresh in place when the poll detects new activity on this PR
+  useEffect(() => {
+    return subscribePRRefresh(owner, repo, pr.number, () => {
+      storeRef.current?.reloadActivity();
+    });
+  }, [owner, repo, pr.number]);
 
   // Extract relevant users for @mention suggestions
   // Priority: PR participants (author, reviewers, assignees, commenters)

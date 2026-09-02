@@ -39,6 +39,7 @@ import {
   GitCommit,
 } from "lucide-react";
 import type { Reaction, ReactionContent } from "../contexts/github";
+import { subscribePRRefresh } from "../lib/pr-refresh-bus";
 import { Skeleton } from "../ui/skeleton";
 import { PROverview } from "./pr-overview";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -255,12 +256,12 @@ export function PRReviewContent({
   } catch {
     // Not in tab context, ignore
   }
-  useEffect(() => {
-    if (!githubReady) return;
-
-    const fetchData = async () => {
-      setLoading(true);
-      setError(null);
+  const fetchData = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      if (!opts?.silent) {
+        setLoading(true);
+        setError(null);
+      }
 
       try {
         const [pr, files, comments, reviewThreadsResult] = await Promise.all([
@@ -294,14 +295,28 @@ export function PRReviewContent({
           inMergeQueue: reviewThreadsResult.isInMergeQueue ?? false,
         });
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Unknown error");
+        // Silent refreshes keep the current data on failure
+        if (!opts?.silent) {
+          setError(e instanceof Error ? e.message : "Unknown error");
+        }
       } finally {
-        setLoading(false);
+        if (!opts?.silent) setLoading(false);
       }
-    };
+    },
+    [github, owner, repo, number, updateTabMeta, tabId]
+  );
 
+  useEffect(() => {
+    if (!githubReady) return;
     fetchData();
-  }, [github, owner, repo, number, githubReady]);
+  }, [githubReady, fetchData]);
+
+  // In-place refresh when the poll detects new activity on this PR
+  useEffect(() => {
+    return subscribePRRefresh(owner, repo, number, () =>
+      fetchData({ silent: true })
+    );
+  }, [owner, repo, number, fetchData]);
 
   // Show loading while GitHub client initializes
   if (!githubReady) {

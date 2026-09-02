@@ -21,6 +21,7 @@ import {
 import { useGitHubStore } from "../contexts/github";
 import { setLastViewed } from "../lib/waiting-prs";
 import { parsePRUrl } from "../lib/pr-url";
+import { notifyPRRefresh } from "../lib/pr-refresh-bus";
 import {
   getEnabled as notifsEnabled,
   sendNotification,
@@ -133,13 +134,11 @@ export function AppShell() {
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
-  // Bumped when a notification fires for the active PR tab so the tab content
-  // remounts and refetches instead of showing stale data.
-  const [prRefreshEpochs, setPrRefreshEpochs] = useState<
-    Record<string, number>
-  >({});
-  // Transient hint for the "open PR from clipboard" shortcut
-  const [clipboardHint, setClipboardHint] = useState<string | null>(null);
+  // Transient hint pill (clipboard errors, new activity on the viewed PR)
+  const [hint, setHint] = useState<{
+    text: string;
+    kind: "warn" | "success";
+  } | null>(null);
   const [hintClosing, setHintClosing] = useState(false);
 
   const updateScrollArrows = useCallback(() => {
@@ -332,20 +331,20 @@ export function AppShell() {
         e.preventDefault();
         openPRReviewTab(parsed.owner, parsed.repo, parsed.number);
       } else if (text.trim()) {
-        setClipboardHint("No PR URL in clipboard");
+        setHint({ text: "No PR URL in clipboard", kind: "warn" });
       }
     };
     window.addEventListener("paste", handlePaste);
     return () => window.removeEventListener("paste", handlePaste);
   }, [openPRReviewTab]);
 
-  // Auto-dismiss the clipboard hint
+  // Auto-dismiss the hint
   useEffect(() => {
-    if (!clipboardHint) return;
+    if (!hint) return;
     setHintClosing(false);
     const timer = setTimeout(() => setHintClosing(true), 2500);
     return () => clearTimeout(timer);
-  }, [clipboardHint]);
+  }, [hint]);
 
   // Reset title when switching to home tab
   useEffect(() => {
@@ -397,24 +396,25 @@ export function AppShell() {
         if (!enrichment) continue;
         // Process each new activity value exactly once (getNotifiedAt tracks
         // the last processed updatedAt): refresh cached data, badge the tab,
-        // and remount it if the user is looking at it right now.
+        // and update the viewed one in place.
         if (
           !notifiedThisCycle.has(prId) &&
           enrichment.updatedAt > (getNotifiedAt(prId) ?? "")
         ) {
           notifiedThisCycle.add(prId);
           setNotifiedAt(prId, enrichment.updatedAt);
-          // Drop cached PR data so the tab refetches on next visit.
+          // Drop cached PR data so the refetches hit the network.
           queryClient.invalidateQueries({
             queryKey: ["pull-request", tab.owner, tab.repo, tab.number],
           });
-          // If the user is looking at this PR right now, remount it so the
-          // new activity is visible immediately. Otherwise badge it.
+          // If the user is looking at this PR right now, refresh it in place
+          // (no remount) and hint about the new activity when it's not
+          // already read. Otherwise badge it.
           if (tab.id === activeTab?.id) {
-            setPrRefreshEpochs((prev) => ({
-              ...prev,
-              [tab.id]: (prev[tab.id] ?? 0) + 1,
-            }));
+            notifyPRRefresh(tab.owner, tab.repo, tab.number);
+            if (!enrichment.isReadByViewer) {
+              setHint({ text: "New activity on this PR", kind: "success" });
+            }
           } else {
             markTabUpdated(tab.id);
           }
@@ -476,14 +476,7 @@ export function AppShell() {
       // is indistinguishable from "no new activity".
       console.warn("PR activity poll failed", e);
     }
-  }, [
-    tabs,
-    activeTab,
-    githubStore,
-    markTabUpdated,
-    queryClient,
-    setPrRefreshEpochs,
-  ]);
+  }, [tabs, activeTab, githubStore, markTabUpdated, queryClient]);
 
   // Poll PR activity every 60s. The interval lives in a stable effect and
   // reads the latest checkPRs via a ref: depending on `tabs` directly would
@@ -629,14 +622,7 @@ export function AppShell() {
           activeTab.owner &&
           activeTab.repo &&
           activeTab.number && (
-            <div
-              key={
-                prRefreshEpochs[activeTab.id]
-                  ? `${activeTab.id}:${prRefreshEpochs[activeTab.id]}`
-                  : activeTab.id
-              }
-              className="absolute inset-0"
-            >
+            <div key={activeTab.id} className="absolute inset-0">
               <PRReviewContent
                 owner={activeTab.owner}
                 repo={activeTab.repo}
@@ -652,22 +638,25 @@ export function AppShell() {
           )}
       </div>
 
-      {clipboardHint && (
+      {hint && (
         <div
           onAnimationEnd={() => {
             if (hintClosing) {
-              setClipboardHint(null);
+              setHint(null);
               setHintClosing(false);
             }
           }}
           className={cn(
-            "fixed bottom-4 right-4 z-[200] bg-yellow-400 border border-yellow-500 rounded-md shadow-lg px-3 py-1.5 text-xs font-medium text-yellow-950",
+            "fixed bottom-4 right-4 z-[200] rounded-md shadow-lg px-3 py-1.5 text-xs font-medium",
+            hint.kind === "success"
+              ? "bg-green-400 border border-green-500 text-green-950"
+              : "bg-yellow-400 border border-yellow-500 text-yellow-950",
             hintClosing
               ? "animate-out slide-out-to-right fade-out fill-mode-forwards duration-200"
               : "animate-in slide-in-from-right fade-in duration-200"
           )}
         >
-          {clipboardHint}
+          {hint.text}
         </div>
       )}
     </div>
