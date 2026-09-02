@@ -3718,12 +3718,30 @@ function ReviewThreadBox({
                           ? "-"
                           : " "}
                     </span>
-                    {line.content.map((seg, j) => (
-                      <span
-                        key={j}
-                        dangerouslySetInnerHTML={{ __html: seg.html }}
-                      />
-                    ))}
+                    {line.content.map((seg, j) => {
+                      // Mirror the main diff view's inline word-diff styling
+                      // so merged -/+ rows are readable here too
+                      const isTinyChange =
+                        seg.type !== "normal" && seg.value.length <= 2;
+                      return (
+                        <span
+                          key={j}
+                          className={cn(
+                            seg.type === "insert" &&
+                              "bg-[var(--code-added)]/20 text-[var(--diff-insert-fg)]",
+                            seg.type === "delete" &&
+                              "bg-[var(--code-removed)]/20 text-[var(--diff-delete-fg)] line-through decoration-orange-500/50",
+                            isTinyChange &&
+                              seg.type === "insert" &&
+                              "bg-[var(--code-added)]/40 font-semibold",
+                            isTinyChange &&
+                              seg.type === "delete" &&
+                              "bg-[var(--code-removed)]/40 font-semibold"
+                          )}
+                          dangerouslySetInnerHTML={{ __html: seg.html }}
+                        />
+                      );
+                    })}
                   </td>
                 </tr>
               ))}
