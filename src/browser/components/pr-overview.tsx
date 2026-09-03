@@ -60,6 +60,7 @@ import {
 import { getTimeAgo, formatDateTime } from "../lib/dates";
 import { parseDiffCached, type ParsedDiff } from "../lib/diff";
 import { discussionUrl } from "../lib/pr-url";
+import { getLatestReviewsByUser, getLatestReviewByUser } from "../lib/reviews";
 import type { ReviewComment } from "@/api/types";
 import type { components } from "@octokit/openapi-types";
 import { useQuery } from "@tanstack/react-query";
@@ -1124,22 +1125,10 @@ export const PROverview = memo(function PROverview() {
       isTeam?: boolean;
     }> = [];
 
-    const byUser = new Map<string, Review>();
+    const byUser = getLatestReviewByUser(reviews);
     const requestedLogins = new Set(
       pr.requested_reviewers?.map((r) => r.login) ?? []
     );
-    for (const r of reviews) {
-      if (
-        r.user &&
-        (r.state === "APPROVED" ||
-          r.state === "CHANGES_REQUESTED" ||
-          r.state === "COMMENTED")
-      ) {
-        // Skip re-requested reviewers — they'll show as PENDING instead
-        if (requestedLogins.has(r.user.login)) continue;
-        byUser.set(r.user.login, r);
-      }
-    }
 
     const addReviewer = (
       login: string,
@@ -1165,10 +1154,11 @@ export const PROverview = memo(function PROverview() {
     // Collect all reviews first (changes requested, approved, commented)
     for (const r of byUser.values()) {
       if (r.user) {
+        // Skip re-requested reviewers — they'll show as PENDING instead
+        if (requestedLogins.has(r.user.login)) continue;
         addReviewer(r.user.login, r.user.avatar_url, r.state);
       }
-    }
-    // Then pending reviewers who haven't submitted any review
+    } // Then pending reviewers who haven't submitted any review
     if (pr.requested_reviewers) {
       for (const reviewer of pr.requested_reviewers) {
         addReviewer(reviewer.login, reviewer.avatar_url, "PENDING");
@@ -2051,6 +2041,14 @@ export const PROverview = memo(function PROverview() {
                                   </code>{" "}
                                   branch is in a fork and cannot be deleted from
                                   here.
+                                </>
+                              ) : branchDeleted ? (
+                                <>
+                                  The{" "}
+                                  <code className="break-all px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">
+                                    {pr.head.label || pr.head.ref}
+                                  </code>{" "}
+                                  branch was deleted.
                                 </>
                               ) : (
                                 <>
@@ -5227,30 +5225,6 @@ function calculateCheckStatus(
   if (allChecks.some((c) => c === "failure" || c === "error")) return "failure";
   if (allChecks.some((c) => c === "pending" || c === null)) return "pending";
   return "success";
-}
-
-function getLatestReviewsByUser(reviews: Review[]): Review[] {
-  const byUser = new Map<string, Review>();
-  const sorted = [...reviews]
-    .filter((r) => r.submitted_at && r.user)
-    .sort(
-      (a, b) =>
-        new Date(a.submitted_at!).getTime() -
-        new Date(b.submitted_at!).getTime()
-    );
-
-  // Only include actual reviews (APPROVED or CHANGES_REQUESTED)
-  // COMMENTED is not a review decision - it's just leaving comments
-  for (const review of sorted) {
-    if (
-      (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") &&
-      review.user
-    ) {
-      byUser.set(review.user.login, review);
-    }
-  }
-
-  return [...byUser.values()];
 }
 
 interface PRData {

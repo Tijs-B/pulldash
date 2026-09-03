@@ -1009,6 +1009,40 @@ test("mergePR sets mergeError and clears merging on failure", async () => {
   expect(state.pr.merged).toBe(false);
 });
 
+test("mergePR recomputes branchDeleted from the refetched timeline (auto-delete)", async () => {
+  const github = {
+    ...createMockGitHubStore(),
+    getPRTimeline: async () => [{ event: "head_ref_deleted" }],
+  } as unknown as GitHubStore;
+  const store = new PRReviewStore(github, {
+    pr: createMockPR(),
+    files: [],
+    comments: [],
+    owner: "test",
+    repo: "repo",
+    viewerPermission: "WRITE",
+  });
+
+  await store.mergePR();
+
+  // The timeline refetch is attached to an already-resolved promise during
+  // mergePR, so its state update lands before mergePR's await resumes.
+  expect(store.getSnapshot().branchDeleted).toBe(true);
+});
+
+test("setTimeline derives branchDeleted from head_ref events", () => {
+  const store = createStore();
+
+  store.setTimeline([{ event: "head_ref_deleted" }] as any);
+  expect(store.getSnapshot().branchDeleted).toBe(true);
+
+  store.setTimeline([
+    { event: "head_ref_deleted" },
+    { event: "head_ref_restored" },
+  ] as any);
+  expect(store.getSnapshot().branchDeleted).toBe(false);
+});
+
 // ============================================================================
 // mergePR (stacked PRs - async merge endpoint)
 // ============================================================================

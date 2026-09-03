@@ -428,6 +428,19 @@ export function firstLine(message: string): string {
   return message.split("\n")[0].trim();
 }
 
+/** Whether the head branch is currently deleted, derived from timeline
+ *  events. Repos with auto-delete set this on merge — the merged banner must
+ *  reflect it even though the user never clicked "Delete branch". */
+export function isBranchDeleted(timeline: TimelineEvent[]): boolean {
+  const deleteCount = timeline.filter(
+    (event) => event.event === "head_ref_deleted"
+  ).length;
+  const restoreCount = timeline.filter(
+    (event) => event.event === "head_ref_restored"
+  ).length;
+  return deleteCount > restoreCount;
+}
+
 /**
  * Find the best matching commit in `candidates` for the given `commit`.
  * Tries Change-Id exact match first, then subject-line exact match.
@@ -2976,7 +2989,7 @@ export class PRReviewStore {
   };
 
   setTimeline = (timeline: TimelineEvent[]) => {
-    this.set({ timeline });
+    this.set({ timeline, branchDeleted: isBranchDeleted(timeline) });
   };
 
   setPr = (pr: PullRequest) => {
@@ -3566,13 +3579,6 @@ export class PRReviewStore {
           .catch(() => [] as TimelineEvent[]),
       ]);
 
-      const deleteCount = (timelineData as { event?: string }[]).filter(
-        (event) => event.event === "head_ref_deleted"
-      ).length;
-      const restoreCount = (timelineData as { event?: string }[]).filter(
-        (event) => event.event === "head_ref_restored"
-      ).length;
-
       // Batch-fetch checks for force-push commits in the timeline
       const forcePushShas = (
         timelineData as Array<{ event?: string; commit_id?: string }>
@@ -3593,7 +3599,7 @@ export class PRReviewStore {
         reviews: reviewsData,
         conversation: conversationData,
         timeline: timelineData,
-        branchDeleted: deleteCount > restoreCount,
+        branchDeleted: isBranchDeleted(timelineData),
         overviewLoading: false,
       });
     } catch {
@@ -3868,10 +3874,15 @@ export class PRReviewStore {
         });
       }
 
-      // Refetch timeline in background (enqueue/merge creates event)
+      // Refetch timeline in background (enqueue/merge creates event). Also
+      // re-derive branchDeleted: repos with auto-delete on merge delete the
+      // head branch server-side, and the merged banner must not offer a
+      // "Delete branch" button for a branch that no longer exists.
       this.github
         .getPRTimeline(owner, repo, pr.number)
-        .then((timeline) => this.set({ timeline }))
+        .then((timeline) =>
+          this.set({ timeline, branchDeleted: isBranchDeleted(timeline) })
+        )
         .catch(() => {});
 
       return true;
