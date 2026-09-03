@@ -80,6 +80,7 @@ const SECTIONS: ShortcutSection[] = [
         description: "Previous / next commit",
       },
       { keys: [[["v"]]], description: "Toggle viewed on current file" },
+      { keys: [[["cmd", "f"]]], description: "Search in diff" },
       { keys: [[["o"]]], description: "Go to PR overview" },
       { keys: [[["c"]]], description: "Comment on focused line" },
       { keys: [[["w"]]], description: "Toggle word wrap" },

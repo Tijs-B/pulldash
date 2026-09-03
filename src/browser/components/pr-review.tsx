@@ -40,6 +40,11 @@ import {
 } from "lucide-react";
 import type { Reaction, ReactionContent } from "../contexts/github";
 import { subscribePRRefresh } from "../lib/pr-refresh-bus";
+import {
+  mapRangeToSegments,
+  searchPatches,
+  searchRows,
+} from "../lib/diff-search";
 import { Skeleton } from "../ui/skeleton";
 import { PROverview } from "./pr-overview";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -1230,6 +1235,17 @@ const DiffPanel = memo(function DiffPanel() {
   const isLoading = useIsCurrentFileLoading();
   const conversationsCount = useConversationsSidebarCount();
 
+  // Keep the last parsed diff around while a newly selected file loads, so
+  // DiffViewer stays mounted (preserving in-progress search state) and the
+  // view shows the previous content dimmed under a loading overlay instead
+  // of unmounting.
+  const lastParsedDiffRef = useRef<ParsedDiff | null>(null);
+  if (parsedDiff) {
+    lastParsedDiffRef.current = parsedDiff;
+  }
+  const displayDiff = parsedDiff ?? lastParsedDiffRef.current;
+  const isSwitchingFiles = isLoading && !parsedDiff && !!displayDiff;
+
   const displayFiles = useMemo(() => {
     if (!selectedCommitSha) return files;
     const commitFile: PullRequestFile = {
@@ -1302,12 +1318,19 @@ const DiffPanel = memo(function DiffPanel() {
           <div className="flex-1 min-h-0 flex flex-row">
             {/* Scrollable diff content - DiffViewer handles its own virtualized scroll */}
             <div className="flex-1 min-h-0 flex flex-col">
-              {parsedDiff && parsedDiff.hunks.length > 0 ? (
-                <DiffViewer
-                  diff={parsedDiff}
-                  viewMode={diffViewMode}
-                  wordWrap={wordWrap}
-                />
+              {displayDiff && displayDiff.hunks.length > 0 ? (
+                <div className="relative flex flex-1 min-h-0 flex-col">
+                  <DiffViewer
+                    diff={displayDiff}
+                    viewMode={diffViewMode}
+                    wordWrap={wordWrap}
+                  />
+                  {isSwitchingFiles && (
+                    <div className="absolute inset-0 z-10 bg-background/70">
+                      <DiffSkeleton />
+                    </div>
+                  )}
+                </div>
               ) : isLoading || (currentFile.patch && !parsedDiff) ? (
                 // Show skeleton if loading OR if file has patch but diff isn't ready yet
                 <DiffSkeleton />
@@ -2167,27 +2190,6 @@ const DiffViewer = memo(function DiffViewer({
       } else {
         const artifact = hunk.isRebaseArtifact;
         if (viewMode === "split") {
-          // DEBUG: log all lines for every hunk
-          if (hunk.lines && hunk.lines.length > 0) {
-            const firstOld = hunk.lines.find(
-              (l: any) => l.oldLineNumber != null
-            )?.oldLineNumber;
-            const firstNew = hunk.lines.find(
-              (l: any) => l.newLineNumber != null
-            )?.newLineNumber;
-            console.log(
-              `DEBUG hunk lines (firstOld=${firstOld}, firstNew=${firstNew}, count=${hunk.lines.length}):`
-            );
-            hunk.lines.forEach((l: any, i: number) => {
-              const t = l.type;
-              const o = l.oldLineNumber ?? l.lineNumber ?? "?";
-              const n = l.newLineNumber ?? "?";
-              const v = l.content?.map((s: any) => s.value).join("") ?? "";
-              console.log(
-                `  [${i}] ${t} old=${o} new=${n} content="${v.substring(0, 80)}"`
-              );
-            });
-          }
           // Convert to split pairs
           const pairs = convertToSplitPairs(hunk.lines);
           for (const pair of pairs) {
@@ -2843,9 +2845,324 @@ const DiffViewer = memo(function DiffViewer({
     return () => clearTimeout(timer);
   }, [conversationScrollTarget, virtualRows, virtualizer, store]);
 
+  // ==========================================================================
+  // Content search (Cmd/Ctrl+F)
+  // ==========================================================================
+  const files = usePRReviewSelector((s) => s.files);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const pendingMatchRef = useRef<{
+    side: "old" | "new";
+    oldLine: number | null;
+    newLine: number | null;
+    start: number;
+    length: number;
+    expanded: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 200);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  // Cmd/Ctrl+F opens search outside text fields; Esc closes it.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        e.preventDefault();
+        setSearchOpen(true);
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      } else if (e.key === "Escape" && searchOpen) {
+        setSearchOpen(false);
+        setSearchQuery("");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [searchOpen]);
+
+  // Current file: matches against the rendered rows (expansion-aware).
+  const rowMatches = useMemo(
+    () =>
+      searchOpen && debouncedQuery
+        ? searchRows(virtualRows, debouncedQuery)
+        : [],
+    [virtualRows, debouncedQuery, searchOpen]
+  );
+  // Other files: matches against their raw patches (already in memory).
+  const patchMatches = useMemo(
+    () =>
+      searchOpen && debouncedQuery ? searchPatches(files, debouncedQuery) : [],
+    [files, debouncedQuery, searchOpen]
+  );
+
+  const searchMatches = useMemo(() => {
+    const out: Array<{
+      filename: string;
+      side: "old" | "new";
+      oldLine: number | null;
+      newLine: number | null;
+      start: number;
+      length: number;
+      rowIndex?: number;
+    }> = [];
+    for (const file of files) {
+      if (file.filename === selectedFile) {
+        for (const m of rowMatches) {
+          out.push({ filename: file.filename, ...m });
+        }
+      } else {
+        for (const m of patchMatches) {
+          if (m.filename !== file.filename) continue;
+          out.push({
+            filename: m.filename,
+            side: m.kind === "delete" ? "old" : "new",
+            oldLine: m.oldLine,
+            newLine: m.newLine,
+            start: m.start,
+            length: m.length,
+          });
+        }
+      }
+    }
+    return out;
+  }, [files, selectedFile, rowMatches, patchMatches]);
+
+  const activeSearchIndex = searchMatches.length
+    ? Math.min(activeMatchIndex, searchMatches.length - 1)
+    : 0;
+
+  const searchHitsByRow = useMemo(() => {
+    const map = new Map<
+      number,
+      Array<{ side: "old" | "new"; start: number; length: number }>
+    >();
+    for (const m of searchMatches) {
+      if (m.rowIndex === undefined) continue;
+      const arr = map.get(m.rowIndex) ?? [];
+      arr.push({ side: m.side, start: m.start, length: m.length });
+      map.set(m.rowIndex, arr);
+    }
+    return map;
+  }, [searchMatches]);
+
+  // The match the counter points at — highlighted differently where rendered.
+  const activeSearchHit = useMemo(() => {
+    const m = searchMatches[activeSearchIndex];
+    if (!m || m.rowIndex === undefined) return null;
+    return {
+      rowIndex: m.rowIndex,
+      side: m.side,
+      start: m.start,
+      length: m.length,
+    };
+  }, [searchMatches, activeSearchIndex]);
+
+  // Browser-like: when the query changes, scroll to the first match in the
+  // open file (never yanking the user to another file while typing). Enter
+  // navigates from there, including across files.
+  const autoScrolledQueryRef = useRef<string | null>(null);
+
+  const goToSearchMatch = useCallback(
+    (index: number) => {
+      if (searchMatches.length === 0) return;
+      const i =
+        ((index % searchMatches.length) + searchMatches.length) %
+        searchMatches.length;
+      setActiveMatchIndex(i);
+      const m = searchMatches[i];
+      if (m.filename === selectedFile && m.rowIndex !== undefined) {
+        pendingMatchRef.current = null;
+        virtualizer.scrollToIndex(m.rowIndex, { align: "center" });
+        return;
+      }
+      pendingMatchRef.current = {
+        side: m.side,
+        oldLine: m.oldLine,
+        newLine: m.newLine,
+        start: m.start,
+        length: m.length,
+        expanded: false,
+      };
+      if (m.filename !== selectedFile) {
+        store.selectFile(m.filename);
+      }
+    },
+    [searchMatches, selectedFile, virtualizer, store]
+  );
+
+  // Resolve a pending cross-file search jump once the target file's rows
+  // exist — expanding a collapsed skip block when the line is inside one.
+  useEffect(() => {
+    const target = pendingMatchRef.current;
+    if (!target) return;
+    const lineNum = target.newLine ?? target.oldLine ?? 0;
+    const rowIndex = getRowIndexForLine(lineNum, target.side);
+    if (rowIndex !== undefined) {
+      pendingMatchRef.current = null;
+      virtualizer.scrollToIndex(rowIndex, { align: "center" });
+      const idx = searchMatches.findIndex(
+        (m) =>
+          m.filename === selectedFile &&
+          m.side === target.side &&
+          m.start === target.start &&
+          m.length === target.length
+      );
+      if (idx !== -1) setActiveMatchIndex(idx);
+      return;
+    }
+    if (target.expanded) return;
+    target.expanded = true;
+    let skipIndex = 0;
+    for (const hunk of hunks) {
+      if (hunk.type !== "skip") continue;
+      const coords = skipBlockStartLines[skipIndex] ?? {
+        newStart: 1,
+        oldStart: 1,
+      };
+      const within =
+        (target.newLine != null &&
+          target.newLine >= coords.newStart &&
+          target.newLine < coords.newStart + hunk.count) ||
+        (target.oldLine != null &&
+          target.oldLine >= coords.oldStart &&
+          target.oldLine < coords.oldStart + hunk.count);
+      if (within) {
+        expandSkipBlock(
+          skipIndex,
+          coords.newStart,
+          coords.oldStart,
+          hunk.count
+        );
+        break;
+      }
+      skipIndex++;
+    }
+  }, [
+    virtualRows,
+    searchMatches,
+    selectedFile,
+    hunks,
+    skipBlockStartLines,
+    getRowIndexForLine,
+    expandSkipBlock,
+    virtualizer,
+  ]);
+
+  // When the query changes and the open file has no match, jump to the first
+  // file that has one (expanding a collapsed block on the way if needed).
+  useEffect(() => {
+    if (!searchOpen || !debouncedQuery) return;
+    if (autoScrolledQueryRef.current === debouncedQuery) return;
+    autoScrolledQueryRef.current = debouncedQuery;
+    const firstInFile = searchMatches.findIndex(
+      (m) => m.rowIndex !== undefined
+    );
+    if (firstInFile !== -1) {
+      setActiveMatchIndex(firstInFile);
+      const rowIndex = searchMatches[firstInFile].rowIndex;
+      if (rowIndex !== undefined) {
+        virtualizer.scrollToIndex(rowIndex, { align: "center" });
+      }
+      return;
+    }
+    if (searchMatches.length > 0) {
+      // Start from the current file's position in the list, wrapping forward.
+      const filePos = new Map(files.map((f, i) => [f.filename, i]));
+      const currentPos = filePos.get(selectedFile ?? "") ?? -1;
+      let target = -1;
+      for (let i = 0; i < searchMatches.length; i++) {
+        const mPos = filePos.get(searchMatches[i].filename) ?? -1;
+        if (mPos >= currentPos) {
+          target = i;
+          break;
+        }
+      }
+      goToSearchMatch(target === -1 ? 0 : target);
+    } else {
+      setActiveMatchIndex(0);
+    }
+  }, [
+    debouncedQuery,
+    searchOpen,
+    searchMatches,
+    files,
+    selectedFile,
+    goToSearchMatch,
+    virtualizer,
+  ]);
+
   return (
     <LineDragContext.Provider value={dragValue}>
-      <div className="flex flex-col flex-1 min-h-0">
+      <div className="relative flex flex-col flex-1 min-h-0">
+        {searchOpen && (
+          <div className="absolute top-2 right-6 z-30 flex items-center gap-1.5 bg-card border border-border rounded-md shadow-lg px-2 py-1.5">
+            <Search className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+            <input
+              ref={searchInputRef}
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  goToSearchMatch(activeSearchIndex + (e.shiftKey ? -1 : 1));
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setSearchOpen(false);
+                  setSearchQuery("");
+                }
+              }}
+              placeholder="Search in diff..."
+              className="w-44 h-6 px-2 text-xs bg-muted border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+            <span className="text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+              {debouncedQuery
+                ? `${searchMatches.length > 0 ? activeSearchIndex + 1 : 0}/${searchMatches.length}`
+                : ""}
+            </span>
+            <button
+              onClick={() => goToSearchMatch(activeSearchIndex - 1)}
+              disabled={searchMatches.length === 0}
+              className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40"
+              title="Previous match (Shift+Enter)"
+            >
+              <ChevronUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => goToSearchMatch(activeSearchIndex + 1)}
+              disabled={searchMatches.length === 0}
+              className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors disabled:opacity-40"
+              title="Next match (Enter)"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                setSearchOpen(false);
+                setSearchQuery("");
+              }}
+              className="p-1 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+              title="Close (Esc)"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         <div
           ref={parentRef}
           className="flex-1 themed-scrollbar overflow-y-auto overflow-x-hidden"
@@ -2876,6 +3193,17 @@ const DiffViewer = memo(function DiffViewer({
                     >
                       <VirtualRowRenderer
                         row={row}
+                        searchHits={searchHitsByRow.get(virtualRow.index)}
+                        activeSearchHit={
+                          activeSearchHit &&
+                          activeSearchHit.rowIndex === virtualRow.index
+                            ? {
+                                side: activeSearchHit.side,
+                                start: activeSearchHit.start,
+                                length: activeSearchHit.length,
+                              }
+                            : undefined
+                        }
                         commentsHidden={commentsHidden}
                         focusedSkipBlockIndex={focusedSkipBlockIndex}
                         focusedCommentId={focusedCommentId}
@@ -2914,6 +3242,12 @@ const DiffViewer = memo(function DiffViewer({
 
 interface VirtualRowRendererProps {
   row: VirtualRowType;
+  searchHits?: Array<{ side: "old" | "new"; start: number; length: number }>;
+  activeSearchHit?: {
+    side: "old" | "new";
+    start: number;
+    length: number;
+  } | null;
   commentsHidden: boolean;
   // Props passed from parent to avoid per-row selectors
   focusedSkipBlockIndex: number | null;
@@ -2934,6 +3268,8 @@ interface VirtualRowRendererProps {
 
 const VirtualRowRenderer = memo(function VirtualRowRenderer({
   row,
+  searchHits,
+  activeSearchHit,
   commentsHidden,
   focusedSkipBlockIndex,
   focusedCommentId,
@@ -2980,6 +3316,8 @@ const VirtualRowRenderer = memo(function VirtualRowRenderer({
           lineNum={row.lineNum}
           isRebaseArtifact={row.isRebaseArtifact}
           wordWrap={wordWrap}
+          searchHits={searchHits}
+          activeSearchHit={activeSearchHit ?? undefined}
         />
       );
     case "split-line":
@@ -2988,6 +3326,8 @@ const VirtualRowRenderer = memo(function VirtualRowRenderer({
           pair={row.pair}
           isRebaseArtifact={row.isRebaseArtifact}
           wordWrap={wordWrap}
+          searchHits={searchHits}
+          activeSearchHit={activeSearchHit ?? undefined}
         />
       );
     case "comment-form":
@@ -3023,6 +3363,85 @@ interface DiffLineRowProps {
   lineNum: number | undefined;
   isRebaseArtifact?: boolean;
   wordWrap: boolean;
+  searchHits?: Array<{ side: "old" | "new"; start: number; length: number }>;
+  activeSearchHit?: { side: "old" | "new"; start: number; length: number };
+}
+
+type SearchPiece = {
+  html?: string;
+  text?: string;
+  matched: boolean;
+  active?: boolean;
+  type?: string;
+};
+
+// Split a line's segments at search-match boundaries. Pieces without a match
+// keep the syntax-highlighted html; pieces covering a match render as plain
+// text so the match can be visually marked. The active match (the one the
+// counter points at) is highlighted differently.
+function buildSearchPieces(
+  content: Array<{ value: string; html: string; type?: string }>,
+  hits: Array<{ side: "old" | "new"; start: number; length: number }>,
+  activeHit?: { side: "old" | "new"; start: number; length: number }
+): SearchPiece[] | null {
+  const bySeg = new Map<
+    number,
+    Array<{ start: number; length: number; active: boolean }>
+  >();
+  for (const hit of hits) {
+    const isActive =
+      !!activeHit &&
+      hit.side === activeHit.side &&
+      hit.start === activeHit.start &&
+      hit.length === activeHit.length;
+    const mapped = mapRangeToSegments(content, hit.side, hit.start, hit.length);
+    if (!mapped) continue;
+    for (const h of mapped) {
+      const arr = bySeg.get(h.segIndex) ?? [];
+      arr.push({ start: h.start, length: h.length, active: isActive });
+      bySeg.set(h.segIndex, arr);
+    }
+  }
+  if (bySeg.size === 0) return null;
+  const pieces: SearchPiece[] = [];
+  for (let i = 0; i < content.length; i++) {
+    const seg = content[i];
+    const segHits = bySeg.get(i);
+    if (!segHits || segHits.length === 0) {
+      pieces.push({ html: seg.html, matched: false, type: seg.type });
+      continue;
+    }
+    segHits.sort((a, b) => a.start - b.start);
+    let cursor = 0;
+    for (const h of segHits) {
+      const s = Math.max(cursor, h.start);
+      const e = Math.max(cursor, h.start + h.length);
+      if (s > cursor) {
+        pieces.push({
+          text: seg.value.slice(cursor, s),
+          matched: false,
+          type: seg.type,
+        });
+      }
+      if (e > s) {
+        pieces.push({
+          text: seg.value.slice(s, e),
+          matched: true,
+          active: h.active,
+          type: seg.type,
+        });
+      }
+      cursor = Math.max(cursor, e);
+    }
+    if (cursor < seg.value.length) {
+      pieces.push({
+        text: seg.value.slice(cursor),
+        matched: false,
+        type: seg.type,
+      });
+    }
+  }
+  return pieces;
 }
 
 const DiffLineRow = memo(function DiffLineRow({
@@ -3030,6 +3449,8 @@ const DiffLineRow = memo(function DiffLineRow({
   lineNum,
   isRebaseArtifact,
   wordWrap,
+  searchHits,
+  activeSearchHit,
 }: DiffLineRowProps) {
   const store = usePRReviewStore();
   const {
@@ -3077,6 +3498,17 @@ const DiffLineRow = memo(function DiffLineRow({
     }
     return result;
   }, [line.content]);
+
+  // When the row contains search matches, split its segments at match
+  // boundaries: matched pieces render as marked plain text, the rest keeps
+  // the syntax-highlighted html.
+  const searchPieces = useMemo(
+    () =>
+      searchHits
+        ? buildSearchPieces(line.content, searchHits, activeSearchHit)
+        : null,
+    [line.content, searchHits, activeSearchHit]
+  );
 
   // Selection highlighting is handled via CSS data attributes (no per-row subscription needed)
 
@@ -3313,30 +3745,55 @@ const DiffLineRow = memo(function DiffLineRow({
             onClick={handleContentClick}
           >
             <Tag className="no-underline">
-              {processedContent.map((seg, i) => {
-                // For tiny inline changes, use more prominent styling
-                const isTinyChange =
-                  seg.type !== "normal" && seg.value.length <= 2;
-                return (
-                  <span
-                    key={i}
-                    className={cn(
-                      seg.type === "insert" &&
-                        "bg-[var(--code-added)]/20 text-[var(--diff-insert-fg)]",
-                      seg.type === "delete" &&
-                        "bg-[var(--code-removed)]/20 text-[var(--diff-delete-fg)] line-through decoration-orange-500/50",
-                      // Extra emphasis for tiny changes
-                      isTinyChange &&
-                        seg.type === "insert" &&
-                        "bg-[var(--code-added)]/40 font-semibold",
-                      isTinyChange &&
-                        seg.type === "delete" &&
-                        "bg-[var(--code-removed)]/40 font-semibold"
-                    )}
-                    dangerouslySetInnerHTML={{ __html: seg.html }}
-                  />
-                );
-              })}
+              {searchPieces
+                ? searchPieces.map((piece, i) =>
+                    piece.html !== undefined ? (
+                      <span
+                        key={i}
+                        dangerouslySetInnerHTML={{ __html: piece.html }}
+                      />
+                    ) : (
+                      <span
+                        key={i}
+                        className={cn(
+                          piece.matched &&
+                            (piece.active
+                              ? "bg-orange-300 dark:bg-orange-500/70 rounded-sm"
+                              : "bg-yellow-300 dark:bg-yellow-500/60 rounded-sm"),
+                          piece.type === "insert" &&
+                            "text-[var(--diff-insert-fg)]",
+                          piece.type === "delete" &&
+                            "text-[var(--diff-delete-fg)] line-through decoration-orange-500/50"
+                        )}
+                      >
+                        {piece.text}
+                      </span>
+                    )
+                  )
+                : processedContent.map((seg, i) => {
+                    // For tiny inline changes, use more prominent styling
+                    const isTinyChange =
+                      seg.type !== "normal" && seg.value.length <= 2;
+                    return (
+                      <span
+                        key={i}
+                        className={cn(
+                          seg.type === "insert" &&
+                            "bg-[var(--code-added)]/20 text-[var(--diff-insert-fg)]",
+                          seg.type === "delete" &&
+                            "bg-[var(--code-removed)]/20 text-[var(--diff-delete-fg)] line-through decoration-orange-500/50",
+                          // Extra emphasis for tiny changes
+                          isTinyChange &&
+                            seg.type === "insert" &&
+                            "bg-[var(--code-added)]/40 font-semibold",
+                          isTinyChange &&
+                            seg.type === "delete" &&
+                            "bg-[var(--code-removed)]/40 font-semibold"
+                        )}
+                        dangerouslySetInnerHTML={{ __html: seg.html }}
+                      />
+                    );
+                  })}
             </Tag>
           </div>
         </div>
@@ -3353,12 +3810,16 @@ interface SplitDiffLineRowProps {
   pair: SplitLinePair;
   isRebaseArtifact?: boolean;
   wordWrap: boolean;
+  searchHits?: Array<{ side: "old" | "new"; start: number; length: number }>;
+  activeSearchHit?: { side: "old" | "new"; start: number; length: number };
 }
 
 const SplitDiffLineRow = memo(function SplitDiffLineRow({
   pair,
   isRebaseArtifact,
   wordWrap,
+  searchHits,
+  activeSearchHit,
 }: SplitDiffLineRowProps) {
   const store = usePRReviewStore();
   const {
@@ -3550,33 +4011,66 @@ const SplitDiffLineRow = memo(function SplitDiffLineRow({
             onClick={handleContentClick}
           >
             <Tag className="no-underline">
-              {line.content.map((seg, i) => {
-                // In split view, only show relevant segment types per side
-                // Left (old) side: only highlight deletes, not inserts
-                // Right (new) side: only highlight inserts, not deletes
-                const showInsert = side === "new" && seg.type === "insert";
-                const showDelete = side === "old" && seg.type === "delete";
-                const isTinyChange =
-                  (showInsert || showDelete) && seg.value.length <= 2;
-                return (
-                  <span
-                    key={i}
-                    className={cn(
-                      showInsert &&
-                        "bg-[var(--code-added)]/20 text-[var(--diff-insert-fg)]",
-                      showDelete &&
-                        "bg-[var(--code-removed)]/20 text-[var(--diff-delete-fg)] line-through decoration-orange-500/50",
-                      isTinyChange &&
+              {(() => {
+                const sideHits = searchHits?.filter((h) => h.side === side);
+                const pieces =
+                  sideHits && sideHits.length > 0
+                    ? buildSearchPieces(line.content, sideHits, activeSearchHit)
+                    : null;
+                if (pieces) {
+                  return pieces.map((piece, i) =>
+                    piece.html !== undefined ? (
+                      <span
+                        key={i}
+                        dangerouslySetInnerHTML={{ __html: piece.html }}
+                      />
+                    ) : (
+                      <span
+                        key={i}
+                        className={cn(
+                          piece.matched &&
+                            (piece.active
+                              ? "bg-orange-300 dark:bg-orange-500/70 rounded-sm"
+                              : "bg-yellow-300 dark:bg-yellow-500/60 rounded-sm"),
+                          piece.type === "insert" &&
+                            "text-[var(--diff-insert-fg)]",
+                          piece.type === "delete" &&
+                            "text-[var(--diff-delete-fg)] line-through decoration-orange-500/50"
+                        )}
+                      >
+                        {piece.text}
+                      </span>
+                    )
+                  );
+                }
+                return line.content.map((seg, i) => {
+                  // In split view, only show relevant segment types per side
+                  // Left (old) side: only highlight deletes, not inserts
+                  // Right (new) side: only highlight inserts, not deletes
+                  const showInsert = side === "new" && seg.type === "insert";
+                  const showDelete = side === "old" && seg.type === "delete";
+                  const isTinyChange =
+                    (showInsert || showDelete) && seg.value.length <= 2;
+                  return (
+                    <span
+                      key={i}
+                      className={cn(
                         showInsert &&
-                        "bg-[var(--code-added)]/40 font-semibold",
-                      isTinyChange &&
+                          "bg-[var(--code-added)]/20 text-[var(--diff-insert-fg)]",
                         showDelete &&
-                        "bg-[var(--code-removed)]/40 font-semibold"
-                    )}
-                    dangerouslySetInnerHTML={{ __html: seg.html }}
-                  />
-                );
-              })}
+                          "bg-[var(--code-removed)]/20 text-[var(--diff-delete-fg)] line-through decoration-orange-500/50",
+                        isTinyChange &&
+                          showInsert &&
+                          "bg-[var(--code-added)]/40 font-semibold",
+                        isTinyChange &&
+                          showDelete &&
+                          "bg-[var(--code-removed)]/40 font-semibold"
+                      )}
+                      dangerouslySetInnerHTML={{ __html: seg.html }}
+                    />
+                  );
+                });
+              })()}
             </Tag>
           </div>
         </div>

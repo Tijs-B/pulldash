@@ -2982,7 +2982,9 @@ export class PRReviewStore {
   };
 
   setFiles = (files: PullRequestFile[]) => {
-    this.set({ files });
+    // Keep the tree display order invariant (the search and file navigation
+    // follow it).
+    this.set({ files: sortFilesLikeTree(files) });
   };
 
   /** Refetch activity data (threads, reviews, conversation, timeline) in
