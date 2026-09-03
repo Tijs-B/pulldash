@@ -15,6 +15,7 @@ import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
 import { usePRReviewSelector } from "../contexts/pr-review";
 import { useCanWrite } from "../contexts/auth";
 import { PREditDialog } from "./pr-edit-dialog";
+import { ReminderMenu } from "./reminder-menu";
 import type { PullRequest } from "@/api/types";
 
 interface PRHeaderProps {
@@ -138,6 +139,15 @@ export const PRHeader = memo(function PRHeader({
           >
             <ExternalLink className="w-4 h-4" />
           </a>
+          <ReminderMenu
+            prId={`${owner}/${repo}#${pr.number}`}
+            owner={owner}
+            repo={repo}
+            number={pr.number}
+            title={pr.title}
+            authorLogin={pr.user?.login}
+            iconClassName="w-4 h-4"
+          />
           {canEdit && (
             <button
               onClick={() => setEditDialogOpen(true)}

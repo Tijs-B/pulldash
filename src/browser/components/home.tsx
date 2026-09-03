@@ -79,6 +79,14 @@ import {
   subscribeLastViewed,
 } from "../lib/waiting-prs";
 import {
+  hasActiveReminder,
+  getActiveReminders,
+  getRemindersVersion,
+  subscribeReminders,
+  type PRReminder,
+} from "../lib/reminders";
+import { ReminderMenu } from "./reminder-menu";
+import {
   getEnabled as notifsEnabled,
   subscribeEnabled as subscribeNotifsEnabled,
 } from "../lib/notifications";
@@ -512,6 +520,35 @@ function extractRepoFromUrl(
   return null;
 }
 
+/** Synthetic list row for a due reminder, so it surfaces even when the PR is
+ *  absent from the fetched search results. repository_url uses the API form
+ *  that extractRepoFromUrl parses. */
+function reminderToRow(r: PRReminder): PRSearchResult {
+  const prId = `${r.owner}/${r.repo}#${r.number}`;
+  let hash = 0;
+  for (let i = 0; i < prId.length; i++)
+    hash = (hash * 31 + prId.charCodeAt(i)) | 0;
+  return {
+    id: hash,
+    number: r.number,
+    title: r.title,
+    html_url: `https://github.com/${r.owner}/${r.repo}/pull/${r.number}`,
+    created_at: r.remindAt,
+    updated_at: r.remindAt,
+    draft: false,
+    state: "open",
+    repository_url: `https://api.github.com/repos/${r.owner}/${r.repo}`,
+    user: r.authorLogin
+      ? {
+          login: r.authorLogin,
+          avatar_url: `https://avatars.githubusercontent.com/${r.authorLogin}?v=4`,
+        }
+      : null,
+    labels: [],
+    pull_request: { merged_at: null },
+  };
+}
+
 // ============================================================================
 // Mode Options
 // ============================================================================
@@ -827,22 +864,39 @@ export function Home() {
     subscribeLastViewed,
     getLastViewedVersion
   );
+  const remindersVersion = useSyncExternalStore(
+    subscribeReminders,
+    getRemindersVersion
+  );
   const filteredPrs = useMemo(() => {
-    if (!showUpdatedOnly) return prs;
-    return prs.filter((pr) => {
-      const info = extractRepoFromUrl(pr.repository_url);
-      if (!info) return false;
-      const prId = `${info.owner}/${info.repo}#${pr.number}`;
-      const viewerLastViewedAt = getLastViewed(prId);
-      const baselines: string[] = [];
-      if (pr.viewerLastReviewAt) baselines.push(pr.viewerLastReviewAt);
-      if (viewerLastViewedAt) baselines.push(viewerLastViewedAt);
-      if (pr.isReadByViewer && pr.updated_at) baselines.push(pr.updated_at);
-      if (baselines.length === 0) return true;
-      const baseline = baselines.reduce((a, b) => (a > b ? a : b));
-      return pr.updated_at ? pr.updated_at > baseline : false;
-    });
-  }, [prs, showUpdatedOnly, lastViewedVersion]);
+    const base = showUpdatedOnly
+      ? prs.filter((pr) => {
+          const info = extractRepoFromUrl(pr.repository_url);
+          if (!info) return false;
+          const prId = `${info.owner}/${info.repo}#${pr.number}`;
+          const viewerLastViewedAt = getLastViewed(prId);
+          const baselines: string[] = [];
+          if (pr.viewerLastReviewAt) baselines.push(pr.viewerLastReviewAt);
+          if (viewerLastViewedAt) baselines.push(viewerLastViewedAt);
+          if (pr.isReadByViewer && pr.updated_at) baselines.push(pr.updated_at);
+          if (baselines.length === 0) return true;
+          const baseline = baselines.reduce((a, b) => (a > b ? a : b));
+          return pr.updated_at ? pr.updated_at > baseline : false;
+        })
+      : prs;
+    // Due, unviewed reminders are always surfaced at the top, even when the
+    // PR itself is absent from the fetched search results (filter/pagination).
+    const present = new Set(
+      base.map((pr) => {
+        const info = extractRepoFromUrl(pr.repository_url);
+        return info ? `${info.owner}/${info.repo}#${pr.number}` : `id:${pr.id}`;
+      })
+    );
+    const reminderRows = getActiveReminders()
+      .filter((r) => !present.has(`${r.owner}/${r.repo}#${r.number}`))
+      .map(reminderToRow);
+    return [...reminderRows, ...base];
+  }, [prs, showUpdatedOnly, lastViewedVersion, remindersVersion]);
 
   // Seed the open/queued/merged dot for PR tabs that don't yet have a status,
   // using the home list's enrichment so we don't pay an extra request per tab.
@@ -1981,6 +2035,12 @@ function PRListItem({ pr, onSelect }: PRListItemProps) {
     return pr.updated_at ? pr.updated_at > baseline : false;
   }, [repoInfo, pr.updated_at, pr.viewerLastReviewAt, pr.isReadByViewer]);
 
+  // Active (due, unviewed-since) reminder for this PR — drives the REMINDER
+  // badge, which takes precedence over NEW ACTIVITY.
+  const reminderActive = repoInfo
+    ? hasActiveReminder(`${repoInfo.owner}/${repoInfo.repo}#${pr.number}`)
+    : false;
+
   const href = repoInfo
     ? `/${repoInfo.owner}/${repoInfo.repo}/pull/${pr.number}`
     : undefined;
@@ -2327,7 +2387,7 @@ function PRListItem({ pr, onSelect }: PRListItemProps) {
   };
 
   return (
-    <BlockLink.Root className="w-full flex items-start gap-2 sm:gap-3 px-2 sm:px-4 py-3 hover:bg-muted/50 transition-colors text-left cursor-pointer">
+    <BlockLink.Root className="w-full flex items-start gap-2 sm:gap-3 px-2 sm:px-4 py-3 hover:bg-muted/50 transition-colors text-left cursor-pointer group">
       {/* PR Icon */}
       {isMerged ? (
         <GitMerge className="w-4 h-4 mt-0.5 shrink-0 text-purple-500" />
@@ -2371,7 +2431,19 @@ function PRListItem({ pr, onSelect }: PRListItemProps) {
               </TooltipContent>
             </Tooltip>
           )}
-          {hasNewContent && (
+          {reminderActive && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 shrink-0 cursor-default">
+                  REMINDER
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" align="start">
+                You asked to be reminded about this PR
+              </TooltipContent>
+            </Tooltip>
+          )}
+          {hasNewContent && !reminderActive && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-500/20 text-amber-400 border border-amber-500/30 shrink-0 cursor-default">
@@ -2442,6 +2514,17 @@ function PRListItem({ pr, onSelect }: PRListItemProps) {
           )}
         </div>
       </div>
+      {repoInfo && (
+        <ReminderMenu
+          prId={`${repoInfo.owner}/${repoInfo.repo}#${pr.number}`}
+          owner={repoInfo.owner}
+          repo={repoInfo.repo}
+          number={pr.number}
+          title={pr.title}
+          authorLogin={pr.user?.login}
+          className="opacity-0 group-hover:opacity-100 focus:opacity-100 mt-0.5"
+        />
+      )}
     </BlockLink.Root>
   );
 }

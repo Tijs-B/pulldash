@@ -20,6 +20,7 @@ import {
 } from "../contexts/tabs";
 import { useGitHubStore } from "../contexts/github";
 import { setLastViewed } from "../lib/waiting-prs";
+import { consumeDueReminders } from "../lib/reminders";
 import { parsePRUrl } from "../lib/pr-url";
 import { notifyPRRefresh } from "../lib/pr-refresh-bus";
 import {
@@ -497,6 +498,43 @@ export function AppShell() {
   useEffect(() => {
     checkPRsRef.current();
     const interval = setInterval(() => checkPRsRef.current(), 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fire due PR reminders every 30s (+ on startup, catching reminders that
+  // came due while the app was closed). Stable-ref pattern as above so tab
+  // changes don't reset the interval. Firing only marks state; the home list
+  // reacts through the reminders store version.
+  const checkReminders = useCallback(() => {
+    consumeDueReminders(Date.now(), (_prId, r) => {
+      const tab = tabs.find(
+        (t) =>
+          t.type === "pr-review" &&
+          t.owner === r.owner &&
+          t.repo === r.repo &&
+          t.number === r.number
+      );
+      if (tab) markTabUpdated(tab.id);
+      if (notifsEnabled()) {
+        sendNotification(
+          r.title,
+          `Reminder · ${r.owner}/${r.repo}#${r.number}`,
+          `/${r.owner}/${r.repo}/pull/${r.number}`,
+          r.authorLogin
+            ? `https://avatars.githubusercontent.com/${r.authorLogin}`
+            : undefined
+        );
+      }
+    });
+  }, [tabs, markTabUpdated]);
+  const checkRemindersRef = useRef(checkReminders);
+  useEffect(() => {
+    checkRemindersRef.current = checkReminders;
+  });
+
+  useEffect(() => {
+    checkRemindersRef.current();
+    const interval = setInterval(() => checkRemindersRef.current(), 30000);
     return () => clearInterval(interval);
   }, []);
 
