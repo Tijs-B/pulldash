@@ -1,5 +1,6 @@
 const ENABLED_KEY = "pulldash_notifications_enabled";
 const TIMESTAMPS_KEY = "pulldash_notified_timestamps";
+const SELF_ACTIVITY_KEY = "pulldash_self_activity";
 const MAX_ENTRIES = 1000;
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
@@ -108,5 +109,33 @@ export function setNotifiedAt(prId: string, updatedAt: string): void {
     localStorage.setItem(TIMESTAMPS_KEY, JSON.stringify(data));
   } catch {
     // ignore
+  }
+}
+
+// Marks that pulldash itself just mutated this PR, so the poll can suppress
+// the notification for the activity that change causes. The marker is
+// intentionally persistent (no TTL): it stays valid until the poll processes
+// the mutation's own updatedAt bump.
+export function markSelfActivity(prId: string): void {
+  try {
+    const data = JSON.parse(localStorage.getItem(SELF_ACTIVITY_KEY) ?? "{}");
+    data[prId] = Date.now();
+    localStorage.setItem(SELF_ACTIVITY_KEY, JSON.stringify(data));
+  } catch {
+    // ignore
+  }
+}
+
+// One-shot: returns (and clears) whether the next activity on this PR was
+// caused by pulldash itself.
+export function consumeSelfActivity(prId: string): boolean {
+  try {
+    const data = JSON.parse(localStorage.getItem(SELF_ACTIVITY_KEY) ?? "{}");
+    if (!(prId in data)) return false;
+    delete data[prId];
+    localStorage.setItem(SELF_ACTIVITY_KEY, JSON.stringify(data));
+    return true;
+  } catch {
+    return false;
   }
 }

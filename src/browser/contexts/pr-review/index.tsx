@@ -39,6 +39,8 @@ import { diffService } from "@/browser/lib/diff";
 import { queryClient } from "@/browser/lib/query-client";
 import { queries } from "@/browser/lib/queries";
 import { subscribePRRefresh } from "@/browser/lib/pr-refresh-bus";
+import { setLastViewed } from "@/browser/lib/waiting-prs";
+import { markSelfActivity } from "@/browser/lib/notifications";
 
 // ============================================================================
 // File Sorting (match file tree order)
@@ -4002,6 +4004,10 @@ export class PRReviewStore {
     try {
       await this.github.deleteBranch(owner, repo, pr.head.ref);
 
+      // The git/refs mutation isn't PR-number-scoped — mark self activity here
+      setLastViewed(`${owner}/${repo}#${pr.number}`);
+      markSelfActivity(`${owner}/${repo}#${pr.number}`);
+
       // Invalidate so the refetch below can't serve the stale cached timeline
       this.invalidatePRCaches(owner, repo, pr.number);
 
@@ -4034,6 +4040,10 @@ export class PRReviewStore {
 
     try {
       await this.github.restoreBranch(owner, repo, pr.head.ref, pr.head.sha);
+
+      // The git/refs mutation isn't PR-number-scoped — mark self activity here
+      setLastViewed(`${owner}/${repo}#${pr.number}`);
+      markSelfActivity(`${owner}/${repo}#${pr.number}`);
 
       // Invalidate so the refetch below can't serve the stale cached timeline
       this.invalidatePRCaches(owner, repo, pr.number);

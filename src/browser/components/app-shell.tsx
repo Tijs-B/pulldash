@@ -27,6 +27,7 @@ import {
   sendNotification,
   getNotifiedAt,
   setNotifiedAt,
+  consumeSelfActivity,
 } from "../lib/notifications";
 import { Home } from "./home";
 import { PRReviewContent } from "./pr-review";
@@ -403,6 +404,9 @@ export function AppShell() {
         ) {
           notifiedThisCycle.add(prId);
           setNotifiedAt(prId, enrichment.updatedAt);
+          // Activity caused by pulldash itself (the marker is set by every
+          // mutation) must not notify.
+          const selfMutated = consumeSelfActivity(prId);
           // Drop cached PR data so the refetches hit the network.
           queryClient.invalidateQueries({
             queryKey: ["pull-request", tab.owner, tab.repo, tab.number],
@@ -412,7 +416,7 @@ export function AppShell() {
           // already read. Otherwise badge it.
           if (tab.id === activeTab?.id) {
             notifyPRRefresh(tab.owner, tab.repo, tab.number);
-            if (!enrichment.isReadByViewer) {
+            if (!enrichment.isReadByViewer && !selfMutated) {
               setHint({ text: "New activity on this PR", kind: "success" });
             }
           } else {
@@ -421,7 +425,7 @@ export function AppShell() {
           // GitHub reports the thread as read for the viewer's own activity
           // (or after visiting it on github.com) — only notify about unread
           // activity.
-          if (notifsEnabled() && !enrichment.isReadByViewer) {
+          if (notifsEnabled() && !enrichment.isReadByViewer && !selfMutated) {
             const prUrl = `/${tab.owner}/${tab.repo}/pull/${tab.number}`;
             sendNotification(
               `New activity on ${tab.owner}/${tab.repo} PR #${tab.number}`,
@@ -454,13 +458,16 @@ export function AppShell() {
           !enrichment.isReadByViewer
         ) {
           notifiedThisCycle.add(prId);
+          const selfMutated = consumeSelfActivity(prId);
           const prUrl = `/${owner}/${repo}/pull/${number}`;
-          sendNotification(
-            `New activity on ${owner}/${repo} PR #${number}`,
-            pr.title,
-            prUrl,
-            `https://avatars.githubusercontent.com/${owner}`
-          );
+          if (!selfMutated) {
+            sendNotification(
+              `New activity on ${owner}/${repo} PR #${number}`,
+              pr.title,
+              prUrl,
+              `https://avatars.githubusercontent.com/${owner}`
+            );
+          }
           setNotifiedAt(prId, enrichment.updatedAt);
           // Drop cached PR data so a reopened tab refetches.
           queryClient.invalidateQueries({

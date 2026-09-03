@@ -6,6 +6,7 @@ import {
 } from "@/browser/contexts/github";
 import { usePRReviewStore, usePRReviewSelector } from ".";
 import { setLastViewed } from "@/browser/lib/waiting-prs";
+import { markSelfActivity } from "@/browser/lib/notifications";
 
 export function useReviewActions() {
   const store = usePRReviewStore();
@@ -105,6 +106,9 @@ export function useReviewActions() {
 
       github.invalidatePR(owner, repo, pr.number);
       setLastViewed(`${owner}/${repo}#${pr.number}`);
+      // The GraphQL submit path can't be marked centrally — the resulting
+      // activity is ours and must not notify.
+      markSelfActivity(`${owner}/${repo}#${pr.number}`);
 
       // Refresh comments, reviews, and timeline
       const [newComments, reviews, timeline] = await Promise.all([

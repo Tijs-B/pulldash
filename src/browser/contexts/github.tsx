@@ -14,6 +14,8 @@ import { useAuth } from "./auth";
 import { setOctokit } from "../lib/github-client";
 import { queryClient } from "../lib/query-client";
 import { queries } from "../lib/queries";
+import { setLastViewed } from "../lib/waiting-prs";
+import { markSelfActivity, consumeSelfActivity } from "../lib/notifications";
 
 export type UserTeam = { org: string; slug: string };
 let userTeamsCache: UserTeam[] | null = null;
@@ -445,7 +447,9 @@ function createGitHubStore() {
   function wrapOctokitWithHooks(octokitInstance: Octokit) {
     octokitInstance.hook.wrap("request", async (request, options) => {
       try {
-        return await request(options);
+        const response = await request(options);
+        markSelfMutation(options);
+        return response;
       } catch (error) {
         if (error && typeof error === "object" && "status" in error) {
           if (error.status === 401) {
@@ -474,6 +478,29 @@ function createGitHubStore() {
         throw error;
       }
     });
+  }
+
+  // A successful PR/issue mutation made through pulldash: the resulting
+  // activity is the viewer's own, so it must not notify. Also records the PR
+  // as viewed (the homepage "Updated" filter would otherwise flag the user's
+  // own change as unseen). REST mutations only — GraphQL ones mark at their
+  // call sites, where owner/repo/number are in scope.
+  function markSelfMutation(options: Record<string, unknown>) {
+    if (options.method === "GET") return;
+    const url = options.url;
+    if (typeof url !== "string") return;
+    const isPull = url.startsWith("/repos/{owner}/{repo}/pulls/{pull_number}");
+    const isIssue = url.startsWith(
+      "/repos/{owner}/{repo}/issues/{issue_number}"
+    );
+    if (!isPull && !isIssue) return;
+    // Reactions don't change the PR — don't burn the self marker on them.
+    if (url.includes("/reactions")) return;
+    const number = options.pull_number ?? options.issue_number;
+    if (typeof number !== "number") return;
+    const prId = `${options.owner}/${options.repo}#${number}`;
+    setLastViewed(prId);
+    markSelfActivity(prId);
   }
 
   function getState() {
@@ -1292,6 +1319,7 @@ function createGitHubStore() {
       `mutation ($input: DequeuePullRequestInput!) { dequeuePullRequest(input: $input) { mergeQueueEntry { id } } }`,
       { input: { id: prNodeId } }
     );
+    markSelfActivity(`${owner}/${repo}#${number}`);
     invalidatePR(owner, repo, number);
   }
 
@@ -1306,6 +1334,7 @@ function createGitHubStore() {
       `mutation ($input: EnqueuePullRequestInput!) { enqueuePullRequest(input: $input) { mergeQueueEntry { id } } }`,
       { input: { pullRequestId: prNodeId } }
     );
+    markSelfActivity(`${owner}/${repo}#${number}`);
     invalidatePR(owner, repo, number);
   }
 
