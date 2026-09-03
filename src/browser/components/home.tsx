@@ -72,7 +72,12 @@ import {
   subscribeTeams,
   type PRSearchResult,
 } from "../contexts/github";
-import { getLastViewed, setLastViewed } from "../lib/waiting-prs";
+import {
+  getLastViewed,
+  setLastViewed,
+  getLastViewedVersion,
+  subscribeLastViewed,
+} from "../lib/waiting-prs";
 import {
   getEnabled as notifsEnabled,
   subscribeEnabled as subscribeNotifsEnabled,
@@ -815,7 +820,13 @@ export function Home() {
   const prs = prListData?.items ?? [];
   const totalCount = prListData?.totalCount ?? 0;
 
-  // Client-side filter for UPDATED PRs
+  // Client-side filter for UPDATED PRs. Depends on the last-viewed version so
+  // viewing a PR (which bumps it) immediately drops it from the list, matching
+  // the NEW ACTIVITY badge that recomputes on every render.
+  const lastViewedVersion = useSyncExternalStore(
+    subscribeLastViewed,
+    getLastViewedVersion
+  );
   const filteredPrs = useMemo(() => {
     if (!showUpdatedOnly) return prs;
     return prs.filter((pr) => {
@@ -831,7 +842,7 @@ export function Home() {
       const baseline = baselines.reduce((a, b) => (a > b ? a : b));
       return pr.updated_at ? pr.updated_at > baseline : false;
     });
-  }, [prs, showUpdatedOnly]);
+  }, [prs, showUpdatedOnly, lastViewedVersion]);
 
   // Seed the open/queued/merged dot for PR tabs that don't yet have a status,
   // using the home list's enrichment so we don't pay an extra request per tab.

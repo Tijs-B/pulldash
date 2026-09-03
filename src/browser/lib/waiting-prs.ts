@@ -31,6 +31,25 @@ export function getLastViewed(prId: string): string | null {
   return read()[prId] ?? null;
 }
 
+// Reactive version of the last-viewed store, so consumers (e.g. the home
+// page's Updated filter) can recompute when a PR is viewed.
+let version = 0;
+const listeners = new Set<() => void>();
+
+export function getLastViewedVersion(): number {
+  return version;
+}
+
+export function subscribeLastViewed(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function notify() {
+  version++;
+  listeners.forEach((l) => l());
+}
+
 export function setLastViewed(prId: string): void {
   const data = read();
   data[prId] = new Date().toISOString();
@@ -38,6 +57,7 @@ export function setLastViewed(prId: string): void {
     prune(data);
   }
   write(data);
+  notify();
 }
 
 export function clearLastViewed(prId: string): void {
@@ -47,4 +67,5 @@ export function clearLastViewed(prId: string): void {
     prune(data);
   }
   write(data);
+  notify();
 }
