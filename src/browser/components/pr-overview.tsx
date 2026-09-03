@@ -59,6 +59,7 @@ import {
 } from "../contexts/pr-review";
 import { getTimeAgo, formatDateTime } from "../lib/dates";
 import { parseDiffCached, type ParsedDiff } from "../lib/diff";
+import { discussionUrl } from "../lib/pr-url";
 import type { ReviewComment } from "@/api/types";
 import type { components } from "@octokit/openapi-types";
 import { useQuery } from "@tanstack/react-query";
@@ -1768,6 +1769,7 @@ export const PROverview = memo(function PROverview() {
                             createdAt={comment.created_at}
                             updatedAt={comment.updated_at}
                             commentUrl={comment.html_url}
+                            onGitHubUrl={comment.html_url}
                             body={comment.body ?? null}
                             bodyHtml={comment.body_html}
                             isAuthor={comment.user?.login === currentUser}
@@ -2924,6 +2926,7 @@ function CommentBox({
   createdAt,
   updatedAt,
   commentUrl,
+  onGitHubUrl,
   body,
   bodyHtml,
   isAuthor,
@@ -2941,6 +2944,8 @@ function CommentBox({
   createdAt: string;
   updatedAt?: string;
   commentUrl?: string;
+  /** Canonical GitHub permalink for this comment, shown as an "Open in GitHub" action */
+  onGitHubUrl?: string;
   body: string | null;
   /** Pre-rendered HTML with signed attachment URLs from GitHub's API */
   bodyHtml?: string;
@@ -3093,6 +3098,7 @@ function CommentBox({
       {reactions ||
       onAddReaction ||
       onQuote ||
+      onGitHubUrl ||
       (isAuthor && (onEdit || onDelete)) ? (
         <div className="px-4 py-2 border-t border-border bg-card flex items-center gap-1">
           <EmojiReactions
@@ -3102,6 +3108,17 @@ function CommentBox({
             currentUser={currentUser}
           />
           <div className="ml-auto flex items-center gap-3">
+            {onGitHubUrl && (
+              <a
+                href={onGitHubUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                title="Open in GitHub"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
             {onQuote && (
               <button
                 onClick={() => onQuote(body ?? "")}
@@ -3485,6 +3502,7 @@ function ReviewThreadBox({
     isSingleCommentMetadata(c.body)
   );
   const store = usePRReviewStore();
+  const prHtmlUrl = usePRReviewSelector((s) => s.pr.html_url);
   const metadataContext = useMemo(() => {
     if (!isMetadataComment) return null;
     const info = parseCommitMetadataMarker(firstComment?.body ?? "");
@@ -3803,7 +3821,7 @@ function ReviewThreadBox({
                   </>
                 )}
                 <a
-                  href={`https://github.com/${owner}/${repo}/pull/${prNumber}#discussion_r${comment.databaseId}`}
+                  href={discussionUrl(prHtmlUrl, comment.databaseId)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-muted-foreground hover:underline"
@@ -3868,6 +3886,15 @@ function ReviewThreadBox({
                   currentUser={currentUser}
                 />
                 <div className="ml-auto flex items-center gap-3">
+                  <a
+                    href={discussionUrl(prHtmlUrl, comment.databaseId)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    title="Open in GitHub"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
                   {canWrite && (
                     <button
                       onClick={() =>

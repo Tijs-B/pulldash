@@ -7,6 +7,7 @@ import {
   equivalentShortShas,
 } from "../contexts/pr-review";
 import { getTimeAgo } from "../lib/dates";
+import { discussionUrl } from "../lib/pr-url";
 import type { LocalPendingComment } from "../contexts/pr-review";
 import type { ReviewThread } from "../contexts/github";
 import {
@@ -283,7 +284,10 @@ export const ConversationsSidebar = memo(function ConversationsSidebar() {
                   filters.threadDateMode === "created"
                     ? createdAt
                     : latestUpdatedAt;
-                const commentUrl = `${prUrl}#discussion_r${firstComment.databaseId}`;
+                const commentUrl = discussionUrl(
+                  prUrl,
+                  firstComment.databaseId
+                );
                 const threadIsOutdated = isOutdated(thread);
 
                 const seenLogins = new Set<string>();

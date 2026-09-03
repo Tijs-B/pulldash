@@ -13,3 +13,11 @@ export function parsePRUrl(
     number: parseInt(match[3], 10),
   };
 }
+
+/**
+ * Canonical permalink for a PR review-thread comment, matching GitHub's
+ * "Copy link" anchor (e.g. .../pull/1#discussion_r123).
+ */
+export function discussionUrl(prHtmlUrl: string, databaseId: number): string {
+  return `${prHtmlUrl}#discussion_r${databaseId}`;
+}

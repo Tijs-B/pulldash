@@ -4919,6 +4919,15 @@ const CommentItem = memo(function CommentItem({
                   compact
                 />
                 <div className="ml-auto flex items-center gap-3">
+                  <a
+                    href={comment.html_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    title="Open in GitHub"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
                   {canWrite && (
                     <button
                       onClick={() => store.startReplying(comment.id)}
