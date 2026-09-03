@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Octokit } from "@octokit/core";
+import { retry } from "@octokit/plugin-retry";
 import type { components } from "@octokit/openapi-types";
 import { useAuth } from "./auth";
 import { setOctokit } from "../lib/github-client";
@@ -16,6 +17,9 @@ import { queryClient } from "../lib/query-client";
 import { queries } from "../lib/queries";
 import { setLastViewed } from "../lib/waiting-prs";
 import { markSelfActivity, consumeSelfActivity } from "../lib/notifications";
+
+// Retries transient failures (5xx, network errors, rate limits) with backoff
+const RetryOctokit = Octokit.plugin(retry);
 
 export type UserTeam = { org: string; slug: string };
 let userTeamsCache: UserTeam[] | null = null;
@@ -525,7 +529,7 @@ function createGitHubStore() {
   // ---------------------------------------------------------------------------
 
   function initialize(token: string) {
-    octokit = new Octokit({ auth: token });
+    octokit = new RetryOctokit({ auth: token });
     wrapOctokitWithHooks(octokit);
     batcher = new GraphQLBatcher(octokit);
     setOctokit(octokit);
