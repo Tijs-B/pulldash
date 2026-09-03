@@ -771,25 +771,8 @@ export const Markdown = memo(function Markdown({
     }
   }, [children, html, emptyState]);
 
-  // If pre-rendered HTML is provided (from GitHub's API with signed attachment URLs), use it
-  if (html) {
-    return (
-      <ImagePreviewProvider>
-        {isEmpty && emptyState}
-        <div
-          ref={containerRef}
-          className={cn("markdown-body", className, isEmpty && "hidden")}
-        >
-          <HtmlWithMentions
-            html={html}
-            navigate={navigate}
-            prTitles={prTitles}
-          />
-        </div>
-      </ImagePreviewProvider>
-    );
-  }
   // Parse the content to find @mentions and wrap them
+  // (must run before any early return so hook order is stable across renders)
   const processedContent = useMemo(() => {
     // Split by @mentions but keep the mentions
     const parts: Array<{ type: "text" | "mention"; content: string }> = [];
@@ -817,6 +800,25 @@ export const Markdown = memo(function Markdown({
 
     return parts;
   }, [children]);
+
+  // If pre-rendered HTML is provided (from GitHub's API with signed attachment URLs), use it
+  if (html) {
+    return (
+      <ImagePreviewProvider>
+        {isEmpty && emptyState}
+        <div
+          ref={containerRef}
+          className={cn("markdown-body", className, isEmpty && "hidden")}
+        >
+          <HtmlWithMentions
+            html={html}
+            navigate={navigate}
+            prTitles={prTitles}
+          />
+        </div>
+      </ImagePreviewProvider>
+    );
+  }
 
   // If there are no mentions, just render normally
   const hasMentions = processedContent.some((p) => p.type === "mention");
