@@ -2567,7 +2567,7 @@ const DiffViewer = memo(function DiffViewer({
         dragSideRef.current === side
       ) {
         // Only extend selection within the same side (old or new)
-        store.setFocusedLine(lineNum, side);
+        store.setFocusedLine(lineNum, side, "mouse");
       }
     },
     [store]
@@ -3929,7 +3929,7 @@ const SplitDiffLineRow = memo(function SplitDiffLineRow({
             state.focusedLineSide ?? side
           );
         }
-        store.setFocusedLine(lineNumber, side);
+        store.setFocusedLine(lineNumber, side, "mouse");
         return;
       }
     };
@@ -3939,7 +3939,7 @@ const SplitDiffLineRow = memo(function SplitDiffLineRow({
       if (e.shiftKey) return;
       const selection = window.getSelection();
       if (selection && selection.toString().length > 0) return;
-      store.setFocusedLine(lineNumber, side);
+      store.setFocusedLine(lineNumber, side, "mouse");
       store.setSelectionAnchor(null, null);
     };
 
