@@ -2,11 +2,52 @@ import type { ReviewComment } from "@/api/types";
 import {
   useGitHub,
   type Review,
+  type ReviewThread,
   type TimelineEvent,
 } from "@/browser/contexts/github";
-import { usePRReviewStore, usePRReviewSelector } from ".";
+import {
+  usePRReviewStore,
+  usePRReviewSelector,
+  type LocalPendingComment,
+} from ".";
 import { setLastViewed } from "@/browser/lib/waiting-prs";
 import { markSelfActivity } from "@/browser/lib/notifications";
+
+/** Represent a just-submitted comment as a thread so it renders under its
+ *  review before the review-threads query catches up. */
+function pendingCommentToThread(
+  comment: LocalPendingComment,
+  reviewId: number,
+  author: { login: string; avatarUrl: string } | null,
+  timestamp: string
+): ReviewThread {
+  return {
+    id: `pending-thread-${comment.id}`,
+    isResolved: false,
+    isOutdated: false,
+    resolvedBy: null,
+    pullRequestReview: { databaseId: reviewId, author },
+    comments: {
+      nodes: [
+        {
+          id: comment.nodeId ?? comment.id,
+          databaseId: comment.databaseId ?? 0,
+          body: comment.body,
+          path: comment.path,
+          line: comment.line,
+          originalLine: comment.line,
+          startLine: comment.start_line ?? null,
+          diffHunk: null,
+          originalCommit: null,
+          author,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          replyTo: null,
+        },
+      ],
+    },
+  };
+}
 
 export function useReviewActions() {
   const store = usePRReviewStore();
@@ -110,12 +151,17 @@ export function useReviewActions() {
       // activity is ours and must not notify.
       markSelfActivity(`${owner}/${repo}#${pr.number}`);
 
-      // Refresh comments, reviews, and timeline
-      const [newComments, reviews, timeline] = await Promise.all([
-        github.getPRComments(owner, repo, pr.number),
-        github.getPRReviews(owner, repo, pr.number),
-        github.getPRTimeline(owner, repo, pr.number),
-      ]);
+      // Refresh comments, reviews, timeline, and review threads
+      const [newComments, reviews, timeline, threadsResult] = await Promise.all(
+        [
+          github.getPRComments(owner, repo, pr.number),
+          github.getPRReviews(owner, repo, pr.number),
+          github.getPRTimeline(owner, repo, pr.number),
+          github
+            .getReviewThreads(owner, repo, pr.number)
+            .catch(() => ({ threads: [] as ReviewThread[] })),
+        ]
+      );
 
       // If the review we just submitted isn't in the re-fetched data yet
       // (eventual consistency), add it manually so it appears immediately.
@@ -130,9 +176,34 @@ export function useReviewActions() {
         } as TimelineEvent);
       }
 
+      // Threads can lag behind the submit too. Append a thread for any
+      // submitted comment the refetch is missing so it shows under its review.
+      const threads = [...threadsResult.threads];
+      if (newReview?.id) {
+        const knownCommentIds = new Set(
+          threads.flatMap((t) => t.comments.nodes.map((c) => c.databaseId))
+        );
+        const author = currentUser
+          ? {
+              login: currentUser,
+              avatarUrl: `https://avatars.githubusercontent.com/${currentUser}`,
+            }
+          : null;
+        const timestamp = new Date().toISOString();
+        for (const comment of state.pendingComments) {
+          if (!comment.databaseId || knownCommentIds.has(comment.databaseId)) {
+            continue;
+          }
+          threads.push(
+            pendingCommentToThread(comment, newReview.id, author, timestamp)
+          );
+        }
+      }
+
       store.setComments(newComments as ReviewComment[]);
       store.setReviews(reviews);
       store.setTimeline(timeline);
+      store.setReviewThreads(threads);
       store.setOverviewLoading(false);
 
       // If we got the review ID from REST, use it; otherwise find the latest review
