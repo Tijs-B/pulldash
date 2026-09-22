@@ -151,6 +151,50 @@ export function buildPostImageLines(patch: string): string[] {
 }
 
 /**
+ * A deleted line whose content is unique among its own patch's deletions,
+ * and also unique among the other patch's deletions, has an unambiguous
+ * fate: if both patches delete it, it's gone in both — full stop. GitHub's
+ * underlying (patch1-vs-base, patch2-vs-base) diffs can legally place that
+ * delete on either side of an unrelated, differently-shaped adjacent insert
+ * block (e.g. one patch's diff groups a new method's body with the rename
+ * below it and drops the separating blank-context line; the other patch's
+ * diff keeps that blank line as context and puts the delete after the new
+ * method instead). That reordering has no bearing on whether the line
+ * survives — but it can push the two matching delete entries into
+ * different diffArrays chunks, which independently fall back to "the other
+ * patch doesn't touch this line" and wrongly emit a delete *and* a
+ * far-apart insert for what is really one already-net-removed line.
+ *
+ * Cancelling such pairs before the LCS pass removes the ambiguity outright.
+ * Repeated content (blank lines, common short statements) is left alone —
+ * position-sensitive LCS is the best available signal there, and blind
+ * bipartite matching on repeated content risks pairing unrelated lines.
+ */
+function cancelMutualUniqueDeletes(
+  entriesA: PatchLineEntry[],
+  entriesB: PatchLineEntry[]
+): [PatchLineEntry[], PatchLineEntry[]] {
+  const deleteCounts = (entries: PatchLineEntry[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+    for (const e of entries) {
+      if (e.kind === "delete")
+        counts.set(e.content, (counts.get(e.content) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const countsA = deleteCounts(entriesA);
+  const countsB = deleteCounts(entriesB);
+  const cancel = new Set<string>();
+  for (const [content, count] of countsA) {
+    if (count === 1 && countsB.get(content) === 1) cancel.add(content);
+  }
+  if (cancel.size === 0) return [entriesA, entriesB];
+  const strip = (entries: PatchLineEntry[]): PatchLineEntry[] =>
+    entries.filter((e) => !(e.kind === "delete" && cancel.has(e.content)));
+  return [strip(entriesA), strip(entriesB)];
+}
+
+/**
  * Compute the interdiff between two versions of a commit's patch.
  *
  * @param patch1 Unified diff patch for the old version of the commit
@@ -162,8 +206,10 @@ export function computeInterdiff(
   patch2: string,
   filename?: string
 ): ParsedDiff {
-  const entriesA = buildPatchEntries(patch1);
-  const entriesB = buildPatchEntries(patch2);
+  const [entriesA, entriesB] = cancelMutualUniqueDeletes(
+    buildPatchEntries(patch1),
+    buildPatchEntries(patch2)
+  );
 
   // Pure-rebase short-circuit: identical kind-tagged sequences mean both
   // patches do the same thing (possibly at different line positions).

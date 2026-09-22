@@ -799,4 +799,46 @@ describe("computeInterdiff", () => {
     // new-side hunkStart used as a wrong-coordinate-space fallback.
     expect(hunk.oldStart).toBe(1);
   });
+
+  test("a line both patches delete stays hidden even when an adjacent insert-only block is placed differently around it", () => {
+    // Real-world shape (from a GitHub PR interdiff): v1 and v2 both delete
+    // "shared_delete_line" and both insert the same new block — but the
+    // underlying (base->v1) and (base->v2) diffs are free to place that
+    // delete on either side of the new block when a blank/context line
+    // could equally anchor it either way. v1's diff keeps line2 as context
+    // between the new block and the delete; v2's diff drops that context
+    // role and puts the delete before the new block instead. Net effect for
+    // both versions is identical — nothing should show as changed here.
+    const patch1 = [
+      "@@ -1,5 +1,7 @@",
+      " line1",
+      "+new_block_1",
+      "+new_block_2",
+      " line2",
+      "-shared_delete_line",
+      "+replacement_line",
+      " line3",
+      " line4",
+    ].join("\n");
+    const patch2 = [
+      "@@ -1,5 +1,7 @@",
+      " line1",
+      " line2",
+      "-shared_delete_line",
+      "+new_block_1",
+      "+new_block_2",
+      "+replacement_line",
+      " line3",
+      " line4",
+    ].join("\n");
+
+    const result = computeInterdiff(patch1, patch2, "test.txt");
+    const allContent = result.hunks
+      .filter((h): h is DiffHunk => h.type === "hunk")
+      .flatMap((h) => h.lines)
+      .map((l) => l.content.map((s) => s.value).join(""));
+
+    // Must never appear as a spurious delete or insert on either side.
+    expect(allContent).not.toContain("shared_delete_line");
+  });
 });
